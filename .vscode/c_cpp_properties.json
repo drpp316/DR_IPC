@@ -1,0 +1,38 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/go2/ipc/devel/include/**",
+        "/home/go2/catkin_ws/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/aros_util/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/depth_gene/include/**",
+        "/home/go2/catkin_ws/src/gazebo_ros_pkgs/gazebo_plugins/include/**",
+        "/home/go2/catkin_ws/src/gazebo_ros_pkgs/gazebo_ros/include/**",
+        "/home/go2/catkin_ws/src/gazebo_ros_pkgs/gazebo_ros_control/include/**",
+        "/home/go2/ipc/src/IPC/IPC/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/local_sensing/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/map_generator/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/mockamap/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/Utils/multi_map_server/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/perfect_drone_sim/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/Utils/pose_utils/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/mars_quadrotor_msgs/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/so3_controller/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/so3_quadrotor/include/**",
+        "/home/go2/ipc/src/IPC/mars_uav_sim/uav_simulator/Utils/uav_utils/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

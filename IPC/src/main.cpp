@@ -3,7 +3,7 @@
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "ipc_node");
+    ros::init(argc, argv, "ipc2_node");
     ros::NodeHandle nh;
 
     PlannerClass planner(nh);

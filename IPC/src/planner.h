@@ -27,7 +27,8 @@
 #include <pcl/filters/crop_box.h>
 
 #include "../include/astar.h"
-#include "../include/mpc.h"
+//#include "../include/mpc.h"
+#include "../include/ipc_mpc_adapter.h"
 #include "../include/local_astar.h"
 
 enum UAVMode_e {
@@ -44,31 +45,31 @@ public:
     PlannerClass(ros::NodeHandle &nh) {
         // load param
         double freq;
-        nh.param("/ipc_node/simulation", simu_flag_, true);
-        nh.param("/ipc_node/perfect_simu", perfect_simu_flag_, false);
-        nh.param("/ipc_node/frequency", freq, 100.0);
-        nh.param("/ipc_node/ctrl_delay", ctrl_delay_, 0.1);
-        nh.param("/ipc_node/sfc_dis", sfc_dis_, 0.1);
-        nh.param("/ipc_node/thrust_limit", thrust_limit_, 0.5);
-        nh.param("/ipc_node/hover_esti", hover_esti_flag_, true);
-        nh.param("/ipc_node/hover_perc", hover_perc_, 0.23);
-        nh.param("/ipc_node/yaw_ctrl_flag", yaw_ctrl_flag_, false);
-        nh.param("/ipc_node/yaw_gain", yaw_gain_, 0.1);
-        nh.param("/ipc_node/goal_x", goal_p_.x(), 0.0);
-        nh.param("/ipc_node/goal_y", goal_p_.y(), 0.0);
-        nh.param("/ipc_node/goal_z", goal_p_.z(), 1.0);
+        nh.param("/ipc2_node/simulation", simu_flag_, true);
+        nh.param("/ipc2_node/perfect_simu", perfect_simu_flag_, false);
+        nh.param("/ipc2_node/frequency", freq, 100.0);
+        nh.param("/ipc2_node/ctrl_delay", ctrl_delay_, 0.1);
+        nh.param("/ipc2_node/sfc_dis", sfc_dis_, 0.1);
+        nh.param("/ipc2_node/thrust_limit", thrust_limit_, 0.5);
+        nh.param("/ipc2_node/hover_esti", hover_esti_flag_, true);
+        nh.param("/ipc2_node/hover_perc", hover_perc_, 0.23);
+        nh.param("/ipc2_node/yaw_ctrl_flag", yaw_ctrl_flag_, false);
+        nh.param("/ipc2_node/yaw_gain", yaw_gain_, 0.1);
+        nh.param("/ipc2_node/goal_x", goal_p_.x(), 0.0);
+        nh.param("/ipc2_node/goal_y", goal_p_.y(), 0.0);
+        nh.param("/ipc2_node/goal_z", goal_p_.z(), 1.0);
         Eigen::Vector3d map_size, map_low, map_upp;
-        nh.param("/ipc_node/astar/resolution", resolution_, 0.1);
-        nh.param("/ipc_node/astar/map_x_size", map_size.x(), 10.0);
-        nh.param("/ipc_node/astar/map_y_size", map_size.y(), 10.0);
-        nh.param("/ipc_node/astar/map_z_size", map_size.z(), 5.0);
-        nh.param("/ipc_node/astar/expand_dyn", expand_dyn_, 0.25);
-        nh.param("/ipc_node/astar/expand_fix", expand_fix_, 0.25);
+        nh.param("/ipc2_node/astar/resolution", resolution_, 0.1);
+        nh.param("/ipc2_node/astar/map_x_size", map_size.x(), 10.0);
+        nh.param("/ipc2_node/astar/map_y_size", map_size.y(), 10.0);
+        nh.param("/ipc2_node/astar/map_z_size", map_size.z(), 5.0);
+        nh.param("/ipc2_node/astar/expand_dyn", expand_dyn_, 0.25);
+        nh.param("/ipc2_node/astar/expand_fix", expand_fix_, 0.25);
         map_low << -map_size.x()/2.0, -map_size.y()/2.0, 0;
         map_upp <<  map_size.x()/2.0,  map_size.y()/2.0, map_size.z();
         map_upp_ = map_upp;
-        nh.param("/ipc_node/fsm/ref_dis", ref_dis_, 1);
-        nh.param("/ipc_node/fsm/path_dis", path_dis_, 0.1);
+        nh.param("/ipc2_node/fsm/ref_dis", ref_dis_, 1);
+        nh.param("/ipc2_node/fsm/path_dis", path_dis_, 0.1);
 
         // instantiation
         odom_p_ << 0, 0, 1;

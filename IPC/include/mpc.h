@@ -47,47 +47,47 @@ public:
     MPCPlannerClass(ros::NodeHandle& nh) {
         Drag_.setZero();
 
-        nh.param("/ipc_node/mpc/horizon", MPC_HORIZON, 5);
-        nh.param("/ipc_node/mpc/step",    MPC_STEP, 0.1);
-        nh.param("/ipc_node/mpc/ctrl_delay", ctrl_delay_, 0);
+        nh.param("/ipc2_node/mpc/horizon", MPC_HORIZON, 5);
+        nh.param("/ipc2_node/mpc/step",    MPC_STEP, 0.1);
+        nh.param("/ipc2_node/mpc/ctrl_delay", ctrl_delay_, 0);
         u_last_.resize(ctrl_delay_);
         for (int i = 0; i < u_last_.size(); i++) {
             u_last_[i] = Eigen::Vector3d::Zero();
         }
 
-        nh.param("/ipc_node/mpc/R_p",  R_p_, 100.0);
-        nh.param("/ipc_node/mpc/R_v",  R_v_, 0.0);
-        nh.param("/ipc_node/mpc/R_a",  R_a_, 0.0);
-        nh.param("/ipc_node/mpc/R_u",  R_u_, 10.0);
-        nh.param("/ipc_node/mpc/R_u_con",  R_u_con_, 1.0);
-        nh.param("/ipc_node/mpc/R_pN", R_pN_, 0.0);
-        nh.param("/ipc_node/mpc/R_vN", R_vN_, 0.0);
-        nh.param("/ipc_node/mpc/R_aN", R_aN_, 0.0);
+        nh.param("/ipc2_node/mpc/R_p",  R_p_, 100.0);
+        nh.param("/ipc2_node/mpc/R_v",  R_v_, 0.0);
+        nh.param("/ipc2_node/mpc/R_a",  R_a_, 0.0);
+        nh.param("/ipc2_node/mpc/R_u",  R_u_, 10.0);
+        nh.param("/ipc2_node/mpc/R_u_con",  R_u_con_, 1.0);
+        nh.param("/ipc2_node/mpc/R_pN", R_pN_, 0.0);
+        nh.param("/ipc2_node/mpc/R_vN", R_vN_, 0.0);
+        nh.param("/ipc2_node/mpc/R_aN", R_aN_, 0.0);
 
-        nh.param("/ipc_node/mpc/D_x", Drag_(0, 0), 0.0);
-        nh.param("/ipc_node/mpc/D_y", Drag_(1, 1), 0.0);
-        nh.param("/ipc_node/mpc/D_z", Drag_(2, 2), 0.0);
+        nh.param("/ipc2_node/mpc/D_x", Drag_(0, 0), 0.0);
+        nh.param("/ipc2_node/mpc/D_y", Drag_(1, 1), 0.0);
+        nh.param("/ipc2_node/mpc/D_z", Drag_(2, 2), 0.0);
 
-        nh.param("/ipc_node/mpc/vx_min", v_min_.x(), -1.0);
-        nh.param("/ipc_node/mpc/vy_min", v_min_.y(), -1.0);
-        nh.param("/ipc_node/mpc/vz_min", v_min_.z(), -1.0);
-        nh.param("/ipc_node/mpc/vx_max", v_max_.x(),  1.0);
-        nh.param("/ipc_node/mpc/vy_max", v_max_.y(),  1.0);
-        nh.param("/ipc_node/mpc/vz_max", v_max_.z(),  1.0);
+        nh.param("/ipc2_node/mpc/vx_min", v_min_.x(), -1.0);
+        nh.param("/ipc2_node/mpc/vy_min", v_min_.y(), -1.0);
+        nh.param("/ipc2_node/mpc/vz_min", v_min_.z(), -1.0);
+        nh.param("/ipc2_node/mpc/vx_max", v_max_.x(),  1.0);
+        nh.param("/ipc2_node/mpc/vy_max", v_max_.y(),  1.0);
+        nh.param("/ipc2_node/mpc/vz_max", v_max_.z(),  1.0);
 
-        nh.param("/ipc_node/mpc/ax_min", a_min_.x(), -1.0);
-        nh.param("/ipc_node/mpc/ay_min", a_min_.y(), -1.0);
-        nh.param("/ipc_node/mpc/az_min", a_min_.z(), -1.0);
-        nh.param("/ipc_node/mpc/ax_max", a_max_.x(),  1.0);
-        nh.param("/ipc_node/mpc/ay_max", a_max_.y(),  1.0);
-        nh.param("/ipc_node/mpc/az_max", a_max_.z(),  1.0);
+        nh.param("/ipc2_node/mpc/ax_min", a_min_.x(), -1.0);
+        nh.param("/ipc2_node/mpc/ay_min", a_min_.y(), -1.0);
+        nh.param("/ipc2_node/mpc/az_min", a_min_.z(), -1.0);
+        nh.param("/ipc2_node/mpc/ax_max", a_max_.x(),  1.0);
+        nh.param("/ipc2_node/mpc/ay_max", a_max_.y(),  1.0);
+        nh.param("/ipc2_node/mpc/az_max", a_max_.z(),  1.0);
 
-        nh.param("/ipc_node/mpc/ux_min", u_min_.x(), -1.0);
-        nh.param("/ipc_node/mpc/uy_min", u_min_.y(), -1.0);
-        nh.param("/ipc_node/mpc/uz_min", u_min_.z(), -1.0);
-        nh.param("/ipc_node/mpc/ux_max", u_max_.x(),  1.0);
-        nh.param("/ipc_node/mpc/uy_max", u_max_.y(),  1.0);
-        nh.param("/ipc_node/mpc/uz_max", u_max_.z(),  1.0);
+        nh.param("/ipc2_node/mpc/ux_min", u_min_.x(), -1.0);
+        nh.param("/ipc2_node/mpc/uy_min", u_min_.y(), -1.0);
+        nh.param("/ipc2_node/mpc/uz_min", u_min_.z(), -1.0);
+        nh.param("/ipc2_node/mpc/ux_max", u_max_.x(),  1.0);
+        nh.param("/ipc2_node/mpc/uy_max", u_max_.y(),  1.0);
+        nh.param("/ipc2_node/mpc/uz_max", u_max_.z(),  1.0);
 
         ProblemFormation();
         X_0_.resize(mpc_.M.cols(), 1);

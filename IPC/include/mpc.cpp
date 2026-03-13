@@ -171,7 +171,7 @@ void MPCPlannerClass::ProblemFormation(void)
     ROS_INFO("\033[1;32mMPC problem formation done!\033[0m");
 }
 
-void MPCPlannerClass::SystemModel(Eigen::MatrixXd& A, Eigen::MatrixXd& B, double t)
+inline void MPCPlannerClass::SystemModel(Eigen::MatrixXd& A, Eigen::MatrixXd& B, double t)
 {
     A.resize(9, 9);
     A.setZero();

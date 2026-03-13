@@ -1,7 +1,7 @@
 <launch>
     <node pkg="perfect_drone_sim" type="perfect_tracker" name="perfect_tracker" output="screen"></node>
 
-    <node pkg="ipc" type="ipc_node" name="ipc_node" output="screen">
+    <node pkg="ipc" type="ipc2_node" name="ipc2_node" output="screen">
         <!-- publish topic -->
         <remap from="cmd"          to="/planning/pos_cmd"/>
         <remap from="astar_path"   to="/astar/path"/>

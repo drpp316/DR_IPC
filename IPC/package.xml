@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>ipc</name>
+  <name>ipc2</name>
   <version>0.0.0</version>
-  <description>The ipc package</description>
-  <maintainer email="liuwenyi@connect.hku.hk">liuwenyi</maintainer>
+  <description>The ipc2 package</description>
+  <maintainer email="drlp@seu.edu.cn">liuPeng</maintainer>
 
   <license>TODO</license>
 

@@ -19,7 +19,8 @@ def butter_lowpass_filter(data, cutoff, fs, order=5):
 
 
 def reader(master_table):
-    file = './time_sudden_avoid.csv'
+    #file = './time_sudden_avoid.csv'
+    file = '/home/go2/IPC_ws/src/IPC/IPC/config/time_consuming.csv'
     df = pd.read_csv(file, encoding='GB18030')  # 如果不写encoding='GB18030'，则可能会出现中文乱码
     labels = list(df.columns.values)  # 获取所有字段
     print(labels)
@@ -28,8 +29,10 @@ def reader(master_table):
     replan = df[' replan']
     sfc = df[' sfc']
     mpc = df[' mpc']
+    df1= df[' df']
 
-    total = mapping + replan + sfc + mpc
+    #total = mapping + replan + sfc + mpc
+    total =  mpc+df1
 
     # Filtering and plotting
     fig, ax = plt.subplots(1, 1, figsize=(4, 10))
@@ -64,7 +67,7 @@ def reader(master_table):
                notch=notch)
 
     plt.xticks([],fontsize=tick_size)
-    plt.yticks([1,2,3,4,5,6,7,8,9,10],fontsize=tick_size)
+    #plt.yticks([1,2,3,4,5,6,7,8,9,10],fontsize=tick_size)
     plt.xlabel('IPC', fontsize=font_size)
     plt.ylabel('Computation Time [ms]', fontsize=font_size)
     # plt.text(0.8, -1.3, 'Sudden Crossing\nObstacle Appear', fontsize=font_size, weight='bold', color='#f94144', ha='center')

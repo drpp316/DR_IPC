@@ -410,6 +410,7 @@ void PlannerClass::OdomCallback(const nav_msgs::OdometryConstPtr& msg)
     yaw_ = tf::getYaw(msg->pose.pose.orientation);
     has_odom_flag_ = true;
     odom_mutex_.unlock();
+    mpc_->SetAttitude(odom_q_);
 }
 
 void PlannerClass::IMUCallback(const sensor_msgs::ImuConstPtr& msg)
@@ -472,6 +473,18 @@ void PlannerClass::LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
     // pcl::toROSMsg(cloud, map_msg);
     // map_msg.header.frame_id = "world";
     // gird_map_pub_.publish(map_msg);
+
+    static int pub_count = 0;
+    if (++pub_count % 10 == 0) {  // 每10帧发一次，5Hz
+        local_astar_->GetOccupyPcl(cloud);
+        cloud.width = cloud.points.size();
+        cloud.height = 1;
+        cloud.is_dense = true;
+        sensor_msgs::PointCloud2 map_msg;
+        pcl::toROSMsg(cloud, map_msg);
+        map_msg.header.frame_id = "world";
+        gird_map_pub_.publish(map_msg);
+    }
 
     log_times_[0] = (ros::Time::now() - now).toSec() * 1000.0;
 
