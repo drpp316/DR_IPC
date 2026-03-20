@@ -188,17 +188,24 @@ bool MpcWrapper::solveMpc(
 
     acado_current_states_ = current_states;
     
-    acado_feedbackStep();
-    
-    if(!acado_preparationStep())    
-    {
-        return true;
-    }       
-    else
-    {
-        printf("MpcWrapper::solveMpc: acado preparation failed!\n");
+    const int feedback_status = acado_feedbackStep();
+    if (feedback_status != 0) {
+        printf("MpcWrapper::solveMpc: acado feedback failed! status=%d\n", feedback_status);
         return false;
     }
+    
+    const int prep_status = acado_preparationStep();
+    if (prep_status != 0) {
+        printf("MpcWrapper::solveMpc: acado preparation failed! status=%d\n", prep_status);
+        return false;
+    }
+
+    if (!acado_controls_.allFinite()) {
+        printf("MpcWrapper::solveMpc: non-finite controls detected!\n");
+        return false;
+    }
+
+    return true;
 }
 
 void MpcWrapper::getMpcControl(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, 1>> control, int index)

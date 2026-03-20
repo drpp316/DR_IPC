@@ -1,5 +1,5 @@
 <launch>
-    <node pkg="ipc" type="fast_avoid" name="fast_avoid" output="screen">
+    <node pkg="ipc2" type="fast_avoid" name="fast_avoid" output="screen">
         <param name="resolusion"   value="0.1"/>
 
         <param name="obs_dis"      value="2.0"/>

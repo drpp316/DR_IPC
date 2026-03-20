@@ -190,7 +190,7 @@ int main(int argc, char **argv)
     map_cloud.width    = map_cloud.points.size();
     map_cloud.height   = 1;
     map_cloud.is_dense = true;
-    // std::string file = ros::package::getPath("ipc") + "/config/map.pcd";
+    // std::string file = ros::package::getPath("ipc2") + "/config/map.pcd";
     // pcl::io::savePCDFileASCII(file, map_cloud);
 
     ros::Rate(1.0).sleep();

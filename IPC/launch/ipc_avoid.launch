@@ -1,7 +1,7 @@
 <launch>
     <node pkg="perfect_drone_sim" type="perfect_tracker" name="perfect_tracker" output="screen"></node>
 
-    <node pkg="ipc" type="ipc2_node" name="ipc2_node" output="screen">
+    <node pkg="ipc2" type="ipc2_node" name="ipc2_node" output="screen">
         <!-- publish topic -->
         <remap from="cmd"          to="/planning/pos_cmd"/>
         <remap from="astar_path"   to="/astar/path"/>
@@ -18,10 +18,10 @@
         <remap from="goal"         to="/goal"/>
         <remap from="rc_in"        to="/mavros/rc/in"/>
 
-        <rosparam command="load" file="$(find ipc)/config/param_avoid.yaml"/>
+        <rosparam command="load" file="$(find ipc2)/config/param_avoid.yaml"/>
 
     </node>
 
-    <node name="ipc" pkg="rviz" type="rviz" args="-d $(find ipc)/config/fast_obs.rviz"/>
+    <node name="ipc2" pkg="rviz" type="rviz" args="-d $(find ipc2)/config/fast_obs.rviz"/>
 
 </launch>

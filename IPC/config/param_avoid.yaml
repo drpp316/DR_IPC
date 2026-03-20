@@ -27,8 +27,11 @@ astar:
 fsm:
   ref_dis:     42
   path_dis:    0.02
+  ref_v_max:   1.2
 
 mpc:
+  sfc_relax_margin: 0.15
+  sfc_active_planes: 10
   horizon:     15
   step:        0.1
   # ctrl_delay:  0   # n step

@@ -1,5 +1,7 @@
 #include "planner.h"
 #include "../include/polytope/emvp.hpp"
+#include <algorithm>
+#include <limits>
 
 #define BACKWARD_HAS_DW 1
 #include "backward.hpp"
@@ -7,18 +9,203 @@ namespace backward{
     backward::SignalHandling sh;
 }
 
-void PlannerClass::TimerCallback(const ros::TimerEvent &)
+namespace {
+struct PlaneViolationInfo {
+    double max_violation{0.0};  // max(n*p + d), <=0 means inside all half-spaces
+    int worst_index{-1};
+};
+
+PlaneViolationInfo EvaluatePlaneViolation(
+    const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+    const Eigen::Vector3d& p)
 {
-    if (!has_odom_flag_) return;
-    if (mode_ == Manual) {
-        BodyrateCtrlPub(Eigen::Vector3d(0,0,0), 0.05, ros::Time::now());
+    PlaneViolationInfo info;
+    if (planes.rows() <= 0) {
+        info.max_violation = std::numeric_limits<double>::quiet_NaN();
+        info.worst_index = -1;
+        return info;
+    }
+
+    info.max_violation = -std::numeric_limits<double>::infinity();
+    for (int i = 0; i < planes.rows(); ++i) {
+        const double val = planes(i, 0) * p.x() +
+                           planes(i, 1) * p.y() +
+                           planes(i, 2) * p.z() +
+                           planes(i, 3);
+        if (val > info.max_violation) {
+            info.max_violation = val;
+            info.worst_index = i;
+        }
+    }
+    return info;
+}
+
+Eigen::Matrix<double, Eigen::Dynamic, 4> FilterAndSortPlanes(
+    const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+    const Eigen::Vector3d& p,
+    double tol = 1e-6)
+{
+    struct PlaneItem {
+        double margin;
+        Eigen::RowVector4d row;
+    };
+    std::vector<PlaneItem> keep;
+    keep.reserve(planes.rows());
+
+    for (int i = 0; i < planes.rows(); ++i) {
+        const Eigen::Vector3d n(planes(i, 0), planes(i, 1), planes(i, 2));
+        const double n2 = n.squaredNorm();
+        if (n2 < 1e-12) {
+            continue;
+        }
+        const double val = n.dot(p) + planes(i, 3);
+        if (val <= tol) {
+            const double margin = -val / std::sqrt(n2);
+            keep.push_back(PlaneItem{margin, planes.row(i)});
+        }
+    }
+
+    std::sort(keep.begin(), keep.end(),
+              [](const PlaneItem& a, const PlaneItem& b) {
+                  // Prefer the planes closest to the current point so the
+                  // active set keeps the most relevant SFC faces first.
+                  return a.margin < b.margin;
+              });
+
+    Eigen::Matrix<double, Eigen::Dynamic, 4> filtered;
+    filtered.resize(static_cast<int>(keep.size()), 4);
+    for (int i = 0; i < static_cast<int>(keep.size()); ++i) {
+        filtered.row(i) = keep[i].row;
+    }
+    return filtered;
+}
+}  // namespace
+
+void PlannerClass::WriteSfcPlaneCount(const std::string& tag,
+                                      const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+                                      int sfc_steps,
+                                      int path_size,
+                                      const Eigen::Vector3d* ref_p)
+{
+    if (!write_sfc_.is_open()) {
+        return;
+    }
+    const PlaneViolationInfo odom_info = EvaluatePlaneViolation(planes, odom_p_);
+    const bool has_ref = (ref_p != nullptr);
+    const PlaneViolationInfo ref_info =
+        has_ref ? EvaluatePlaneViolation(planes, *ref_p) : PlaneViolationInfo{};
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+
+    write_sfc_ << std::fixed << std::setprecision(6)
+               << ros::Time::now().toSec() << ","
+               << tag << ","
+               << planes.rows() << ","
+               << sfc_steps << ","
+               << astar_index_ << ","
+               << path_size << ","
+               << odom_p_.x() << ","
+               << odom_p_.y() << ","
+               << odom_p_.z() << ","
+               << odom_info.max_violation << ","
+               << odom_info.worst_index << ","
+               << (has_ref ? (*ref_p).x() : nan_v) << ","
+               << (has_ref ? (*ref_p).y() : nan_v) << ","
+               << (has_ref ? (*ref_p).z() : nan_v) << ","
+               << (has_ref ? ref_info.max_violation : nan_v) << ","
+               << (has_ref ? ref_info.worst_index : -1)
+               << std::endl;
+
+    WriteSfcPlaneDetails(tag, planes, sfc_steps, path_size, ref_p);
+}
+
+void PlannerClass::WriteSfcPlaneDetails(const std::string& tag,
+                                        const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+                                        int sfc_steps,
+                                        int path_size,
+                                        const Eigen::Vector3d* ref_p)
+{
+    if (!log_sfc_constraints_ || !write_sfc_detail_.is_open()) {
         return;
     }
 
+    const bool has_ref = (ref_p != nullptr);
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+    const double t_now = ros::Time::now().toSec();
+
+    if (planes.rows() <= 0) {
+        write_sfc_detail_ << std::fixed << std::setprecision(6)
+                          << t_now << ","
+                          << tag << ","
+                          << -1 << ","
+                          << 0 << ","
+                          << sfc_steps << ","
+                          << astar_index_ << ","
+                          << path_size << ","
+                          << odom_p_.x() << "," << odom_p_.y() << "," << odom_p_.z() << ","
+                          << (has_ref ? (*ref_p).x() : nan_v) << ","
+                          << (has_ref ? (*ref_p).y() : nan_v) << ","
+                          << (has_ref ? (*ref_p).z() : nan_v) << ","
+                          << nan_v << "," << nan_v << "," << nan_v << "," << nan_v << ","
+                          << nan_v << "," << nan_v
+                          << std::endl;
+        return;
+    }
+
+    for (int i = 0; i < planes.rows(); ++i) {
+        const double a = planes(i, 0);
+        const double b = planes(i, 1);
+        const double c = planes(i, 2);
+        const double d = planes(i, 3);
+        const double val_odom = a * odom_p_.x() + b * odom_p_.y() + c * odom_p_.z() + d;
+        const double val_ref = has_ref
+                                   ? a * (*ref_p).x() + b * (*ref_p).y() + c * (*ref_p).z() + d
+                                   : nan_v;
+        write_sfc_detail_ << std::fixed << std::setprecision(6)
+                          << t_now << ","
+                          << tag << ","
+                          << i << ","
+                          << planes.rows() << ","
+                          << sfc_steps << ","
+                          << astar_index_ << ","
+                          << path_size << ","
+                          << odom_p_.x() << "," << odom_p_.y() << "," << odom_p_.z() << ","
+                          << (has_ref ? (*ref_p).x() : nan_v) << ","
+                          << (has_ref ? (*ref_p).y() : nan_v) << ","
+                          << (has_ref ? (*ref_p).z() : nan_v) << ","
+                          << a << "," << b << "," << c << "," << d << ","
+                          << val_odom << "," << val_ref
+                          << std::endl;
+    }
+}
+
+
+
+void PlannerClass::TimerCallback(const ros::TimerEvent &)
+{
+
     timer_mutex_.lock();
-    
+    //mode_ = Command;
+
+    // Keep publishing minimal setpoints before odom is ready,
+    if (!has_odom_flag_) {
+        const Eigen::Vector3d zero_rate = Eigen::Vector3d::Zero();
+        const double min_thrust = 0.08;
+        BodyrateCtrlPub(zero_rate, min_thrust, ros::Time::now());
+        WriteNmpcDebug(ros::Time::now().toSec(), zero_rate, 0.0, min_thrust, 0.0,
+                       Eigen::Vector3d::Zero(), false);
+        timer_mutex_.unlock();
+        return;
+    }
+
+    //SFC 约束步长设置
     ros::Time t_start = ros::Time::now();
-    ros::Time t_0 = odom_time_;
+    int sfc_steps = sfc_apply_steps_;
+    if (sfc_steps < 0) {
+        sfc_steps = 0;
+    }
+    if (sfc_steps > mpc_->MPC_HORIZON) {
+        sfc_steps = mpc_->MPC_HORIZON;
+    }
 
     if (mode_ == Command) {
         if (new_goal_flag_) {
@@ -32,6 +219,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
         }
         log_times_[1] = (ros::Time::now() - t_start).toSec() * 1000.0;
 
+        // Feed NMPC with A* references and SFC corridor-constrained horizon goals.
         ros::Time sfc_start = ros::Time::now();
         if (follow_path_.size() > 0) { // follow A* path
             double min_dis = 10000.0;
@@ -44,82 +232,77 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
             }
 
             int goal_in_sfc = astar_index_;
-            if (follow_path_.size() - astar_index_ <= ref_dis_) { // near the end, find the sfc at current point
-                goal_in_sfc = follow_path_.size();
-                Eigen::Matrix<double, Eigen::Dynamic, 4> planes;
-                GenerateAPolytope(odom_p_, odom_p_, planes, 0);
-                for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
-                    mpc_->SetFSC(planes, i);
-                }
-            } else { // find the biggest and the longest sfc
-                Eigen::Matrix<double, Eigen::Dynamic, 4> planes, last_planes;
-                GenerateAPolytope(follow_path_[astar_index_], follow_path_[astar_index_], planes, 0); 
-                last_planes = planes;
-                int init_num = 0;
-                if (mpc_->IsInFSC(odom_p_, planes) == false) { // if odom is not in initial sfc
-                    init_num = (odom_p_ - follow_path_[astar_index_]).norm() / path_dis_ / ref_dis_;
-                    ROS_INFO("\033[35m UAV is out sfc! init num is %d \033[0m", init_num);
-                }
-                int first_id = astar_index_, mpc_goal_index = 0;
-                for (int i = first_id+1; i < follow_path_.size(); i++) { // find last pos in first sfc
-                    if (mpc_->IsInFSC(follow_path_[i], planes)) {
-                        first_id = i;
-                        goal_in_sfc = i;
-                    } else {
-                        first_id -= 0.2 / path_dis_;
-                        if (first_id < astar_index_) first_id = astar_index_;
-                        break;
-                    }
-                }
-                mpc_goal_index = (first_id - astar_index_) / ref_dis_ + init_num + 1;
-                assert(first_id >= astar_index_);
-                for (int i = init_num; i <= mpc_goal_index && i < mpc_->MPC_HORIZON; i++) {
-                    mpc_->SetFSC(planes, i);
-                }
-                int end_index = first_id + (mpc_->MPC_HORIZON-mpc_goal_index) * ref_dis_;
-                if (end_index >= follow_path_.size()) end_index = follow_path_.size() - 1;
-                for (int i = end_index; i >= first_id && mpc_goal_index < mpc_->MPC_HORIZON - 1; i--) {
-                    if (local_astar_->CheckPoint(follow_path_[i]) == false) continue;
-                    if (local_astar_->CheckLineObstacleFree(follow_path_[first_id], follow_path_[i]) == false) continue;
-                    i = i - 0.2 / path_dis_;
-                    if (i <= first_id) break;
-                    Eigen::Matrix<double, Eigen::Dynamic, 4> long_planes;
-                    GenerateAPolytope(follow_path_[first_id], follow_path_[i], long_planes, 1);
-                    if (long_planes.rows() > 0) {
-                        for (int j = mpc_goal_index+1; j < mpc_->MPC_HORIZON; j++) {
-                            mpc_->SetFSC(long_planes, j);
-                        }
-                        mpc_goal_index = mpc_->MPC_HORIZON;
-                        for (int k = first_id; k < follow_path_.size(); k++) {
-                            if (mpc_->IsInFSC(follow_path_[k], long_planes)) goal_in_sfc = k;
-                            else break;
-                        }
-                        // ROS_INFO("\033[43;37m long sfc : %d \033[0m", goal_in_sfc);
-                        break;
-                    }
-                }
-                for (int i = mpc_goal_index+1; i < mpc_->MPC_HORIZON; i++) {
-                    if (last_planes.rows() > 0) mpc_->SetFSC(last_planes, i);
-                }
-            }
+            Update_SfC(sfc_steps, goal_in_sfc);//sfc
 
-            // MPC set goal
+            // MPC set goal p/v/yaw
             mpc_goals_.clear();
             Eigen::Vector3d last_p_ref;
+            double last_yaw_ref = yaw_;
             for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
                 int index = astar_index_ + i * ref_dis_;
                 if (index >= goal_in_sfc) index = goal_in_sfc;
                 if (index >= follow_path_.size()) index = follow_path_.size() - 1;
+                const Eigen::Vector3d p_target = follow_path_[index];
+                const Eigen::Vector3d p_ref = p_target;
+
                 Eigen::Vector3d v_r(0, 0, 0);
-                if (i == 0) v_r = (follow_path_[index] - odom_p_) / mpc_->MPC_STEP;
-                else if (i == mpc_->MPC_HORIZON) v_r.setZero();
-                else v_r = (follow_path_[index] - last_p_ref) / mpc_->MPC_STEP;
-                last_p_ref = follow_path_[index];
-                
-                mpc_->SetGoal(follow_path_[index], v_r, Eigen::Vector3d::Zero(), i);
+                if (i == 0) v_r = (p_ref - odom_p_) / mpc_->MPC_STEP;
+                else v_r = (p_ref - last_p_ref) / mpc_->MPC_STEP;
+                if (ref_v_max_ > 1e-3) {
+                    const double v_norm = v_r.norm();
+                    if (v_norm > ref_v_max_) {
+                        v_r = v_r / v_norm * ref_v_max_;
+                    }
+                }
+                last_p_ref = p_ref;
+
+                double yaw_ref_step = last_yaw_ref;
+                if (yaw_ctrl_flag_) {
+                    int next_index = index + std::max(1, ref_dis_);
+                    if (next_index >= follow_path_.size()) next_index = follow_path_.size() - 1;
+                    const Eigen::Vector3d dir = follow_path_[next_index] - follow_path_[index];
+                    auto wrap_pi = [](double a) {
+                        while (a > M_PI) a -= 2.0 * M_PI;
+                        while (a < -M_PI) a += 2.0 * M_PI;
+                        return a;
+                    };
+                    if (dir.head<2>().norm() > 1e-3) {
+                        const double yaw_target = std::atan2(dir.y(), dir.x());
+                        const double yaw_delta = wrap_pi(yaw_target - yaw_);
+                        yaw_ref_step = yaw_ + yaw_delta;
+                    } else {
+                        yaw_ref_step = yaw_r_;//“全局方向”
+                    }
+                    const double max_step_dyaw = std::max(0.05, yaw_rate_limit_) * mpc_->MPC_STEP;
+                    double dyaw_step = wrap_pi(yaw_ref_step - last_yaw_ref);
+                    dyaw_step = std::max(-max_step_dyaw, std::min(max_step_dyaw, dyaw_step));
+                    yaw_ref_step = last_yaw_ref + dyaw_step;
+                } else {
+                    yaw_ref_step = 0.0;
+                }
+                last_yaw_ref = yaw_ref_step;
+
+                mpc_->SetGoal(p_ref, v_r, Eigen::Vector3d::Zero(), i, yaw_ref_step);
                 // std::cout << "mpc goal " << i << ": " << follow_path_[index].transpose() << " v: " << v_r.transpose() << std::endl;
-                mpc_goals_.push_back(follow_path_[index]);
+                mpc_goals_.push_back(p_ref);
             }
+
+            // Always update terminal reference at step N to avoid stale tail behavior.
+            int terminal_index = astar_index_ + mpc_->MPC_HORIZON * ref_dis_;
+            if (terminal_index >= goal_in_sfc) terminal_index = goal_in_sfc;
+            if (terminal_index >= follow_path_.size()) terminal_index = follow_path_.size() - 1;
+            const Eigen::Vector3d p_terminal_target = follow_path_[terminal_index];
+            const Eigen::Vector3d p_terminal = p_terminal_target;
+            Eigen::Vector3d v_terminal =
+                (p_terminal - last_p_ref) / std::max(1e-3, mpc_->MPC_STEP);
+            if (ref_v_max_ > 1e-3) {
+                const double v_norm = v_terminal.norm();
+                if (v_norm > ref_v_max_) {
+                    v_terminal = v_terminal / v_norm * ref_v_max_;
+                }
+            }
+            mpc_->SetGoal(p_terminal, v_terminal, Eigen::Vector3d::Zero(),
+                          mpc_->MPC_HORIZON, last_yaw_ref);
             AstarPublish(mpc_goals_, 3, 0.1);
 
             // yaw control
@@ -128,89 +311,252 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
                 // yaw_r_ = std::atan2(follow_path_[astar_index_+ref_dis_].y()-odom_p_.y(), follow_path_[astar_index_+ref_dis_].x()-odom_p_.x());
             }
         } else { // stay at initial position
+            Clear_SfC(0);
             yaw_r_ = 0.0;
+            mpc_goals_.clear();
             for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
-                mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), i);
+                mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), i, yaw_r_);
+                mpc_goals_.push_back(goal_p_);
             }
+            mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                          mpc_->MPC_HORIZON, yaw_r_);
+            AstarPublish(mpc_goals_, 3, 0.1);
         }
         log_times_[2] = (ros::Time::now() - sfc_start).toSec() * 1000.0;
     }
 
     if (mode_ == Hover) {
+        Clear_SfC(0);
+        mpc_goals_.clear();
         for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
-            mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), i);
+            mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), i, yaw_r_);
+            mpc_goals_.push_back(goal_p_);
         }
+        mpc_->SetGoal(goal_p_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                      mpc_->MPC_HORIZON, yaw_r_);
+        AstarPublish(mpc_goals_, 3, 0.1);
+    }
+
+    //空平面
+    if (mode_ == Command) {
+        Clear_SfC(sfc_steps);//清空MPC，后面步长约束
+    } else {
+        Clear_SfC(0);
     }
     
-    // calculate model predict control algorithm
+
+    // calculate NMPC
     ros::Time mpc_start = ros::Time::now();
+
     mpc_->SetStatus(odom_p_, odom_v_, odom_a_);
+
+    double T_cmd_last;
+    Eigen::Vector3d w_cmd_last;
+    mpc_->GetBodyrateCmd(w_cmd_last, T_cmd_last);
+
+    Eigen::VectorXd y = Eigen::VectorXd::Zero(ACADO_NX);
+    y << odom_p_.x(), odom_p_.y(), odom_p_.z(),
+         odom_q_.w(), odom_q_.x(), odom_q_.y(), odom_q_.z(),
+         odom_v_.x(), odom_v_.y(), odom_v_.z();
+
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(ACADO_NU);
+    if (ACADO_NU > 0) u(0) = w_cmd_last.x();
+    if (ACADO_NU > 1) u(1) = w_cmd_last.y();
+    if (ACADO_NU > 2) u(2) = w_cmd_last.z();
+    if (ACADO_NU > 3) u(3) = T_cmd_last;
+
+    if (!disturbance_inited_) {
+        disturbance_observer_.setFirstZ(y);
+        disturbance_inited_ = true;
+    }
+    disturbance_observer_.kalman_geso_update(y, u, uav_mass_, 9.8066);
+
+    const Eigen::VectorXd d_hat_full = disturbance_observer_.getDisturbance();
+    Eigen::Vector3d d_hat = Eigen::Vector3d::Zero();
+    if (d_hat_full.size() >= 3) {
+        d_hat << d_hat_full(0), d_hat_full(1), d_hat_full(2);
+    }
+    mpc_->SetDisturbance(d_hat);
+
+
     bool success_flag = mpc_->Run();
     log_times_[3] = (ros::Time::now() - mpc_start).toSec() * 1000.0;
 
-    Eigen::Vector3d u_optimal, p_optimal, v_optimal, a_optimal, u_predict;
-    Eigen::MatrixXd A1, B1;
-    Eigen::VectorXd x_optimal = mpc_->X_0_;
+    //rviz 显示NMPC预测的轨迹
     if (success_flag) {
-        last_mpc_time_ = ros::Time::now();
-        for (int i = 0; i <= ctrl_delay_/mpc_->MPC_STEP; i++) {
-            mpc_->GetOptimCmd(u_optimal, i);
-            mpc_->SystemModel(A1, B1, mpc_->MPC_STEP);
-            x_optimal = A1 * x_optimal + B1 * u_optimal;
-        }
-        mpc_ctrl_index_ = ctrl_delay_/mpc_->MPC_STEP;
-
-        p_optimal << x_optimal(0,0), x_optimal(1,0), x_optimal(2,0);
-        v_optimal << x_optimal(3,0), x_optimal(4,0), x_optimal(5,0);
-        a_optimal << x_optimal(6,0), x_optimal(7,0), x_optimal(8,0);
-        if (!perfect_simu_flag_) CmdPublish(odom_p_, v_optimal, a_optimal, u_optimal);
-        else CmdPublish(p_optimal, v_optimal, a_optimal, u_optimal);
-
         std::vector<Eigen::Vector3d> path;
-        x_optimal = mpc_->X_0_;
-        for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
-            mpc_->GetOptimCmd(u_predict, i);
-            mpc_->SystemModel(A1, B1, mpc_->MPC_STEP);
-            x_optimal = A1 * x_optimal + B1 * u_predict;
-            path.push_back(Eigen::Vector3d(x_optimal(0,0), x_optimal(1,0), x_optimal(2,0)));
+        std::vector<Eigen::Vector3d> path_vis;
+        std::vector<Eigen::Vector3d> ref_path;
+        mpc_->GetPredictedPath(path);
+        mpc_->GetReferencePath(ref_path);
+
+        const size_t keep_n =
+            std::min(path.size(), static_cast<size_t>(pred_vis_steps_ + 1));
+        if (keep_n > 0) {
+            path_vis.assign(path.begin(), path.begin() + keep_n);
         }
-        MPCPathPublish(path);
-    } else {
-        double delta_t = (ros::Time::now()-last_mpc_time_).toSec();
-        if (delta_t >= mpc_->MPC_STEP) {
-            mpc_ctrl_index_ += delta_t / mpc_->MPC_STEP;
-            last_mpc_time_ = ros::Time::now();
-        }
-        mpc_->GetOptimCmd(u_optimal, mpc_ctrl_index_);
-        // std::cout << "index: " << mpc_ctrl_index_ << " u_optimal:" << u_optimal.transpose() << std::endl;
-        // std::cout << "x_0: " << mpc_->X_0_.transpose() << std::endl << std::endl;
-        mpc_->SystemModel(A1, B1, mpc_->MPC_STEP);
-        x_optimal = A1 * mpc_->X_0_ + B1 * u_optimal;
-        p_optimal << x_optimal(0,0), x_optimal(1,0), x_optimal(2,0);
-        v_optimal << x_optimal(3,0), x_optimal(4,0), x_optimal(5,0);
-        a_optimal << x_optimal(6,0), x_optimal(7,0), x_optimal(8,0);
-        if (!perfect_simu_flag_) CmdPublish(odom_p_, v_optimal, a_optimal, u_optimal);
-        else CmdPublish(p_optimal, v_optimal, a_optimal, u_optimal);
+        MPCPathPublish(path_vis);
+        WriteNmpcPredDebug(ros::Time::now().toSec(), path, ref_path, success_flag);
     }
+
+   
+
+    Eigen::Vector3d w_cmd;
+    double T_cmd;
+    mpc_->GetBodyrateCmd(w_cmd, T_cmd);
+    const double sfc_eps_cmd = mpc_->GetSfcSlackCmd();
+
+    /*
+    if (yaw_ctrl_flag_) {
+        double yaw_error = yaw_r_ - yaw_;
+        if (yaw_error > M_PI) yaw_error -= 2.0 * M_PI;
+        if (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
+        const double wz_yaw = yaw_gain_ * yaw_error;
+        w_cmd.z() = std::max(-yaw_rate_limit_, std::min(yaw_rate_limit_, wz_yaw));
+    }*/
+
+    // 用planner自己估计的thr2acc_，而不是hardcode
+    double thrust_norm = T_cmd / (uav_mass_ * thr2acc_);
+    thrust_norm = std::max(0.1, std::min(0.9, thrust_norm));
     
-    ros::Time df_start = ros::Time::now();
-    estimateThrustModel(imu_a_);
-    a_optimal = a_optimal + Gravity_;
-    ComputeThrust(a_optimal);
-    ConvertCommand(a_optimal, u_optimal);
-    BodyrateCtrlPub(rate_, thrust_, ros::Time::now());
+    ROS_INFO_THROTTLE(0.3, "[NMPC] w=[%.3f %.3f %.3f] T=%.2fN thr2acc=%.3f norm=%.3f",
+    w_cmd.x(), w_cmd.y(), w_cmd.z(), T_cmd, thr2acc_, thrust_norm);
+    BodyrateCtrlPub(w_cmd, thrust_norm, ros::Time::now());
+
+    WriteNmpcDebug(ros::Time::now().toSec(), w_cmd, T_cmd, thrust_norm,
+                   sfc_eps_cmd, d_hat, success_flag);
 
     timed_thrust_.push(std::pair<ros::Time, double>(ros::Time::now(), thrust_));
     while (timed_thrust_.size() > 100) {
         timed_thrust_.pop();
     }
-    log_times_[4] = (ros::Time::now() - df_start).toSec() * 1000.0;
+    //log_times_[4] = (ros::Time::now() - df_start).toSec() * 1000.0;
 
     // log_times_[0] = (ros::Time::now() - t_start).toSec() * 1000.0;
     WriteLogTime();
-
     timer_mutex_.unlock();
 }
+
+
+//把 NMPC 某一段预测步上的 SFC 约束清空。
+void PlannerClass::Clear_SfC(int begin_step) 
+{
+    if (begin_step < 0) {
+        begin_step = 0;
+    }
+    if (begin_step >= mpc_->MPC_HORIZON) {
+        return;
+    }
+    Eigen::Matrix<double, Eigen::Dynamic, 4> empty_planes;
+    for (int i = begin_step; i < mpc_->MPC_HORIZON; ++i) {
+        mpc_->SetFSC(empty_planes, i);
+    }
+}
+
+/*
+作用：在 Command 模式下，按照当前 A* 路径和多面体生成结果，给 NMPC 的前 sfc_steps 步写入 SFC 约束，并更新 goal_in_sfc。
+它内部会做这些事：
+先清空旧约束（防止残留）
+根据当前位置和路径生成局部/长段多面体
+把约束写到前 sfc_steps 步
+给后续“参考点截断到安全段”提供 goal_in_sfc*/
+void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
+{
+    Clear_SfC(0);//sfc清空
+    /*if (sfc_steps <= 0) {
+        return;
+    }*/
+
+    const int path_size = static_cast<int>(follow_path_.size());
+    goal_in_sfc = astar_index_;
+    const int ref_index = std::min(std::max(astar_index_, 0), std::max(path_size - 1, 0));
+    const Eigen::Vector3d ref_eval = (path_size > 0) ? follow_path_[ref_index] : odom_p_;
+
+    if (path_size - astar_index_ <= ref_dis_) { // near the end, find the sfc at current point
+        goal_in_sfc = path_size;
+        Eigen::Matrix<double, Eigen::Dynamic, 4> planes;
+        GenerateAPolytope(odom_p_, odom_p_, planes, 0);
+        Eigen::Matrix<double, Eigen::Dynamic, 4> planes_used =
+            FilterAndSortPlanes(planes, odom_p_);
+        WriteSfcPlaneCount("near_end", planes_used, sfc_steps, path_size, &ref_eval);
+        if (planes_used.rows() == 0) {
+            ROS_WARN_THROTTLE(0.5, "[SFC] near-end planes all violated, skip constraints this cycle.");
+            return;
+        }
+        for (int i = 0; i < sfc_steps; i++) {
+            mpc_->SetFSC(planes_used, i);
+        }
+        return;
+    }
+
+    // find the biggest and the longest sfc
+    Eigen::Matrix<double, Eigen::Dynamic, 4> planes, last_planes;
+    GenerateAPolytope(follow_path_[astar_index_], follow_path_[astar_index_], planes, 0);
+    Eigen::Matrix<double, Eigen::Dynamic, 4> planes_used =
+        FilterAndSortPlanes(planes, odom_p_);
+    WriteSfcPlaneCount("initial", planes_used, sfc_steps, path_size, &ref_eval);
+    if (planes_used.rows() == 0) {
+        ROS_WARN_THROTTLE(0.5, "[SFC] initial planes all violated, skip constraints this cycle.");
+        return;
+    }
+    last_planes = planes_used;
+    int init_num = 0;
+    if (mpc_->IsInFSC(odom_p_, planes) == false) { // if odom is not in initial sfc
+        init_num = (odom_p_ - follow_path_[astar_index_]).norm() / path_dis_ / ref_dis_;
+        ROS_INFO("\033[35m UAV is out sfc! init num is %d \033[0m", init_num);
+    }
+    int first_id = astar_index_, mpc_goal_index = 0;
+    for (int i = first_id + 1; i < path_size; i++) { // find last pos in first sfc
+        if (mpc_->IsInFSC(follow_path_[i], planes)) {
+            first_id = i;
+            goal_in_sfc = i;
+        } else {
+            first_id -= 0.2 / path_dis_;
+            if (first_id < astar_index_) first_id = astar_index_;
+            break;
+        }
+    }
+    mpc_goal_index = (first_id - astar_index_) / ref_dis_ + init_num + 1;
+    assert(first_id >= astar_index_);
+    for (int i = init_num; i <= mpc_goal_index && i < sfc_steps; i++) {
+        mpc_->SetFSC(planes_used, i);
+    }
+
+    int end_index = first_id + (mpc_->MPC_HORIZON - mpc_goal_index) * ref_dis_;
+    if (end_index >= path_size) end_index = path_size - 1;
+    for (int i = end_index; i >= first_id && mpc_goal_index < mpc_->MPC_HORIZON - 1; i--) {
+        if (local_astar_->CheckPoint(follow_path_[i]) == false) continue;
+        if (local_astar_->CheckLineObstacleFree(follow_path_[first_id], follow_path_[i]) == false) continue;
+        i = i - 0.2 / path_dis_;
+        if (i <= first_id) break;
+        Eigen::Matrix<double, Eigen::Dynamic, 4> long_planes;
+        GenerateAPolytope(follow_path_[first_id], follow_path_[i], long_planes, 1);
+        Eigen::Matrix<double, Eigen::Dynamic, 4> long_used =
+            FilterAndSortPlanes(long_planes, odom_p_);
+        WriteSfcPlaneCount("long", long_used, sfc_steps, path_size, &ref_eval);
+        if (long_used.rows() > 0) {
+            for (int j = mpc_goal_index + 1; j < sfc_steps; j++) {
+                mpc_->SetFSC(long_used, j);
+            }
+            mpc_goal_index = mpc_->MPC_HORIZON;
+            for (int k = first_id; k < path_size; k++) {
+                if (mpc_->IsInFSC(follow_path_[k], long_used)) goal_in_sfc = k;
+                else break;
+            }
+            // ROS_INFO("\033[43;37m long sfc : %d \033[0m", goal_in_sfc);
+            break;
+        }
+    }
+    for (int i = mpc_goal_index + 1; i < sfc_steps; i++) {
+        if (last_planes.rows() > 0) {
+            mpc_->SetFSC(last_planes, i);
+        }
+    }
+    if (last_planes.rows() > 0) {
+        WriteSfcPlaneCount("last", last_planes, sfc_steps, path_size, &ref_eval);
+    }
+}
+
 
 void PlannerClass::GenerateAPolytope(Eigen::Vector3d p1, Eigen::Vector3d p2, Eigen::Matrix<double, Eigen::Dynamic, 4>& planes, uint8_t index)
 {
@@ -400,17 +746,19 @@ void PlannerClass::OdomCallback(const nav_msgs::OdometryConstPtr& msg)
     odom_time_ = msg->header.stamp;
     odom_p_ << msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z;
     odom_v_ << msg->twist.twist.linear.x, msg->twist.twist.linear.y, msg->twist.twist.linear.z; 
-    odom_q_ = Eigen::Quaterniond(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x, 
+    Eigen::Quaterniond qn_ = Eigen::Quaterniond(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x, 
                                  msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
-    odom_a_ = odom_q_ * Eigen::Vector3d(0, 0, 1) * (thrust_ * thr2acc_) - Gravity_;
+    odom_q_=qn_.normalized();
+    /*odom_a_ = odom_q_ * Eigen::Vector3d(0, 0, 1) * (thrust_ * thr2acc_) - Gravity_;
     if (perfect_simu_flag_) {
         odom_v_.setZero();
         // odom_a_.setZero();
     }
+    */
     yaw_ = tf::getYaw(msg->pose.pose.orientation);
+    mpc_->SetAttitude(odom_q_);
     has_odom_flag_ = true;
     odom_mutex_.unlock();
-    mpc_->SetAttitude(odom_q_);
 }
 
 void PlannerClass::IMUCallback(const sensor_msgs::ImuConstPtr& msg)

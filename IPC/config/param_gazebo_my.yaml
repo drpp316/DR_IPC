@@ -17,6 +17,8 @@ goal_x: 0.0
 goal_y: 0.0
 goal_z: 1.0
 
+eso_bandwidth: 0.5
+
 astar:
   resolution: 0.2
   map_x_size: 10.0
@@ -26,43 +28,42 @@ astar:
   expand_fix: 0.2 #   用于**实时检测当前路径是否碰到障碍物**，触发重规划。固定值，代表无人机物理安全距离。
 
 fsm:
-  ref_dis: 5 # 每个MPC步长跳过5个路径点
+  ref_dis: 2 # 每个MPC步长跳过2个路径点
   path_dis: 0.05 # 路径点间距0.05m
-#v_r = ref_dis * path_dis / MPC_STEP = 5 * 0.05 / 0.1 = 2.5 m/s
+  ref_v_max: 1.2 # 参考速度上限(m/s)，限制送入NMPC的v_ref
+#v_r = ref_dis * path_dis / MPC_STEP = 2 * 0.05 / 0.1 = 1.0 m/s
 
 mpc:
-  horizon: 15
+  disturbance_alpha: 0.1
+  disturbance_alpha_z: 0.1
+  disturbance_limit: 100.0
+  disturbance_limit_z: 100.0
+
+  log_sfc_constraints: true
+  sfc_active_planes: 5 # 先保留10个最有效约束面
+  sfc_apply_steps: 2 # 先只对最近1个预测步启用SFC，优先保证可行性
+
+  horizon: 15 # 运行时有效预测步长(<=ACADO_N=20)
   step: 0.1
+  pred_vis_steps: 8 # RViz显示预测前8步(k=0..8)
 
-  R_p: 500.0
-  R_v: 20.0
-  R_phi: 0.0 # 新增：替换 R_a (姿态误差)
-  # 输入权重
-  R_T: 1.01 # 新增：替换 R_u (推力增量)
-  R_w: 1.1 # 新增：替换 R_u_con (角速度)
-  R_w_con: 0.1 # 新增：角速度变化率惩罚
+  R_p: 10.0
+  R_v: 3
 
-  # 终端权重
-  R_pN: 500.0
-  R_vN: 20.0
-  R_phiN: 0.0 # 新增：替换 R_aN
+  R_yaw: 6.0 #偏航角增益
+  R_phi: 3.0 #其余的姿态角增益
 
-  vx_min: -5.0
-  vy_min: -5.0
-  vz_min: -5.0
-  vx_max: 5.0
-  vy_max: 5.0
-  vz_max: 5.0
+  R_pN: 20.0
+  R_vN: 1.0
+  R_yawN: 8.0
+  R_phiN: 2.0
 
-  # 角速度约束 (新增，替换 ax/ay/az 约束)
-  wx_min: -0.8
-  wx_max: 0.8
-  wy_min: -0.8
-  wy_max: 0.8
-  wz_min: -0.5
-  wz_max: 0.5
-
-  # 推力约束 (新增，替换 ux/uy/uz 约束)
-  T_min: 5.1 # mass*g*0.3 = 1.735*9.81*0.3
-  T_max: 42.5 # mass*g*2.5 = 1.735*9.81*2.5
-
+  R_w: 2
+  R_T: 0.5
+  R_sfc_eps: 0.1 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
+  sfc_eps_max: 150.0 # 单步最大可允许SFC违反量；法向量近似归一化时可理解为15cm
+  wx_max: 1.0
+  wy_max: 1.0
+  wz_max: 1.0
+  T_min: 1.0
+  T_max: 40.0

@@ -14,8 +14,15 @@ int main()
     DifferentialState     p_x, p_y, p_z;
     DifferentialState     q_w, q_x, q_y, q_z;
     DifferentialState     v_x, v_y, v_z;
-    Control               w_x, w_y, w_z, T;   
+    Control               w_x, w_y, w_z, T, sfc_eps;
     OnlineData            d_x, d_y, d_z;
+
+    //SFC
+    // Polyhedral corridor constraints: c_x * p_x + c_y * p_y + c_z * p_z + c_d <= 0
+    // Number must be fixed for ACADO code generation.
+    static constexpr int kSfcMaxPlanes = 20;
+    OnlineData            c_x[kSfcMaxPlanes], c_y[kSfcMaxPlanes],
+                          c_z[kSfcMaxPlanes], c_d[kSfcMaxPlanes];
     
     //干扰观测器估计 d_hat_ → 构造 online_data_（复制到所有预测步） →
     //→ 通过 Eigen::Map 赋值给 acado_online_data_ → ACADO 内部绑定到模型中的 d_x, d_y, d_z。
@@ -23,16 +30,17 @@ int main()
 
     // Parameters with exemplary values. These are set/overwritten at runtime.
     const double t_start = 0.0;     // Initial time [s]
-    const double t_end = 2;       // Time horizon [s]
     const double dt = 0.1;          // Discretization time [s] //0.01
-    const int N = round(t_end/dt);  // Number of nodes
+    const int N = 15;               // Number of control intervals in horizon
+    const double t_end = t_start + N * dt;  // Time horizon [s]
     const double g_z = 9.8066;      // Gravity is everywhere [m/s^2]
     const double w_max_yaw = 2.0;     // Maximal yaw rate [rad/s]
     const double w_max_xy = 1.5;      // Maximal pitch and roll rate [rad/s]
     const double T_min = 0;         // Minimal thrust [N/kg]
-    const double m = 1.535; //1.5;1.745    // iris mass [kg]
-    //const double T_max = 2.0*g_z*m;        // Maximal thrust [N/kg]
-    const double T_max = 25.0;        // Maximal thrust [N/kg]
+    const double m = 1.735; //1.5;1.745    // iris mass [kg]
+    const double T_max = 2.0*g_z*m;        // Maximal thrust [N/kg]
+    const double sfc_eps_max = 2.0;        // SFC soft-constraint slack upper bound
+    //const double T_max = 40.0;        // Maximal thrust [N/kg]
 
     //姿态约束：限制无人机 Z 轴与世界坐标系 Z 轴的最大夹角（即最大倾斜角）
     const double tilt_max_deg = 17.0;    // 最大倾斜角度，例如 45 度
@@ -49,7 +57,9 @@ int main()
     f << dot(q_x) ==  0.5 * ( w_x * q_w + w_z * q_y - w_y * q_z);
     f << dot(q_y) ==  0.5 * ( w_y * q_w - w_z * q_x + w_x * q_z);
     f << dot(q_z) ==  0.5 * ( w_z * q_w + w_y * q_x - w_x * q_y);
-    f << dot(v_x) ==  2 * ( q_w * q_y + q_x * q_z ) * T/m + d_x;
+    // ACADO 代码生成里，控制量需出现在系统方程中才能计入 ACADO_NU。
+    // 这里使用极小系数，保证 sfc_eps 被纳入优化变量，同时不影响动力学。
+    f << dot(v_x) ==  2 * ( q_w * q_y + q_x * q_z ) * T/m + d_x + 1e-4 * sfc_eps;
     f << dot(v_y) ==  2 * ( q_y * q_z - q_w * q_x ) * T/m + d_y;
     f << dot(v_z) ==  ( 1 - 2 * q_x * q_x - 2 * q_y * q_y ) * T/m - g_z + d_z;
 
@@ -59,8 +69,8 @@ int main()
     // Running cost vector consists of all states and inputs.
     h << p_x << p_y << p_z
     << q_w << q_x << q_y << q_z
-    << v_x << v_y << v_z 
-    << w_x << w_y << w_z << T;   
+    << v_x << v_y << v_z
+    << w_x << w_y << w_z << T << sfc_eps;
 
     // End cost vector consists of all states (no inputs at last state).
     hN << p_x << p_y << p_z
@@ -85,6 +95,7 @@ int main()
     Q(11,11) = 1;   // wy
     Q(12,12) = 1;   // wz
     Q(13,13) = 1;   // T
+    Q(14,14) = 3000; // sfc_eps (soft-constraint penalty)
 
     //  终端权重
     // End cost weight matrix
@@ -111,6 +122,7 @@ int main()
     r(3) = 0.7071;
     r(6) = 0.7071;
     r(10) = g_z;
+    r(14) = 0.0;
 
     DVector rN(hN.getDim());   // End cost reference
     rN.setZero();
@@ -148,9 +160,15 @@ int main()
     ocp.subjectTo(-w_max_xy <= w_y <= w_max_xy);
     ocp.subjectTo(-w_max_yaw <= w_z <= w_max_yaw);
     ocp.subjectTo( T_min <= T <= T_max);
-    ocp.subjectTo( q_x * q_x + q_y * q_y <= q_sq_bound );
+    ocp.subjectTo( 0.0 <= sfc_eps <= sfc_eps_max );
+    //ocp.subjectTo( q_x * q_x + q_y * q_y <= q_sq_bound );
 
-    ocp.setNOD(3);
+    //sfc约束：p_x, p_y, p_z 需要满足 c_x * p_x + c_y * p_y + c_z * p_z + c_d <= 0
+    for (int i = 0; i < kSfcMaxPlanes; ++i) {
+        ocp.subjectTo(c_x[i] * p_x + c_y[i] * p_y + c_z[i] * p_z + c_d[i] - sfc_eps <= 0.0);
+    }
+
+    ocp.setNOD(3 + 4 * kSfcMaxPlanes);
 
     if(!CODE_GEN) //数值仿真
     {

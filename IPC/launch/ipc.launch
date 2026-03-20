@@ -1,5 +1,5 @@
 <launch>
-    <node pkg="ipc" type="ipc2_node" name="ipc2_node" output="screen">
+    <node pkg="ipc2" type="ipc2_node" name="ipc2_node" output="screen">
         <!-- publish topic -->
         <remap from="cmd"          to="/planning/pos_cmd"/>
         <remap from="astar_path"   to="/astar/path"/>
@@ -16,11 +16,11 @@
         <remap from="goal"         to="/goal"/>
         <remap from="rc_in"        to="/mavros/rc/in"/>
 
-        <rosparam command="load" file="$(find ipc)/config/param.yaml"/>
+        <rosparam command="load" file="$(find ipc2)/config/param.yaml"/>
 
     </node>
 
-    <node name="ipc" pkg="rviz" type="rviz" args="-d $(find ipc)/config/env.rviz"/>
+    <node name="ipc2" pkg="rviz" type="rviz" args="-d $(find ipc2)/config/env.rviz"/>
     
     <!-- <include file="$(find test_interface)/launch/so3_quadrotor_sim.xml"></include> -->
 </launch>

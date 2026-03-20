@@ -5,8 +5,8 @@
 #include "acado_common.h"
 #include "acado_auxiliary_functions.h"
 
-ACADOvariables acadoVariables;
-ACADOworkspace acadoWorkspace;
+extern ACADOvariables acadoVariables;
+extern ACADOworkspace acadoWorkspace;
 
 static constexpr int kCostStateSize = ACADO_NY - ACADO_NU;
 static constexpr int kWeightSize = ACADO_NY * ACADO_N;
