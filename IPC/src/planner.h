@@ -63,6 +63,7 @@ public:
         double yaw_rate_limit_default = 0.5;
         nh.param("/ipc2_node/mpc/wz_max", yaw_rate_limit_default, yaw_rate_limit_default);
         nh.param("/ipc2_node/yaw_rate_limit", yaw_rate_limit_, yaw_rate_limit_default);
+        nh.param("/ipc2_node/yaw_freeze_goal_dist", yaw_freeze_goal_dist_, 0.4);
         nh.param("/ipc2_node/goal_x", goal_p_.x(), 0.0);
         nh.param("/ipc2_node/goal_y", goal_p_.y(), 0.0);
         nh.param("/ipc2_node/goal_z", goal_p_.z(), 1.0);
@@ -129,15 +130,17 @@ public:
 
         std::string file = ros::package::getPath("ipc2") + "/config";
         write_time_.open((file+"/time_consuming.csv"), std::ios::out | std::ios::trunc);
+        write_time_ << std::fixed << std::setprecision(3);
         log_times_.resize(5, 1);
-        write_time_ << "mapping" << ", " << "replan" << ", " << "sfc" << ", " << "mpc" << ", " << "df" << ", " << std::endl;
-
-        write_nmpc_.open((file + "/nmpc_debug.csv"), std::ios::out | std::ios::trunc);
-        write_nmpc_ << std::fixed << std::setprecision(6);
         const std::time_t wall_now = std::time(nullptr);
         char start_time_str[32];
         std::strftime(start_time_str, sizeof(start_time_str), "%Y-%m-%d %H:%M:%S",
                       std::localtime(&wall_now));
+        write_time_ << "run_start_time," << start_time_str << std::endl;
+        write_time_ << "mapping" << ", " << "replan" << ", " << "sfc" << ", " << "mpc" << ", " << "df" << ", " << std::endl;
+
+        write_nmpc_.open((file + "/nmpc_debug.csv"), std::ios::out | std::ios::trunc);
+        write_nmpc_ << std::fixed << std::setprecision(6);
         ROS_INFO_STREAM("[NMPC] debug log start time: " << start_time_str);
         write_nmpc_ << "run_start_time," << start_time_str << std::endl;
         write_nmpc_ << "t_run,"
@@ -528,6 +531,7 @@ private:
     Eigen::Quaterniond odom_q_, u_q_;
     Eigen::Vector3d rate_;
     double yaw_{0}, yaw_r_{0}, yaw_dot_r_{0}, yaw_gain_, yaw_rate_limit_{0.5};
+    double yaw_freeze_goal_dist_{0.4};
 
     int astar_index_{0};
     std::vector<Eigen::Vector3d> astar_path_;

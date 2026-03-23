@@ -13,7 +13,7 @@ int main()
     // Variables 
     DifferentialState     p_x, p_y, p_z;
     DifferentialState     q_w, q_x, q_y, q_z;
-    DifferentialState     v_x, v_y, v_z;
+    DifferentialState     v_x, v_y, v_z, sfc_eps_aux;
     Control               w_x, w_y, w_z, T, sfc_eps;
     OnlineData            d_x, d_y, d_z;
 
@@ -30,8 +30,8 @@ int main()
 
     // Parameters with exemplary values. These are set/overwritten at runtime.
     const double t_start = 0.0;     // Initial time [s]
-    const double dt = 0.1;          // Discretization time [s] //0.01
-    const int N = 15;               // Number of control intervals in horizon
+    const double dt = 0.05;         // Discretization time [s]
+    const int N = 20;               // Number of control intervals in horizon
     const double t_end = t_start + N * dt;  // Time horizon [s]
     const double g_z = 9.8066;      // Gravity is everywhere [m/s^2]
     const double w_max_yaw = 2.0;     // Maximal yaw rate [rad/s]
@@ -42,11 +42,6 @@ int main()
     const double sfc_eps_max = 2.0;        // SFC soft-constraint slack upper bound
     //const double T_max = 40.0;        // Maximal thrust [N/kg]
 
-    //姿态约束：限制无人机 Z 轴与世界坐标系 Z 轴的最大夹角（即最大倾斜角）
-    const double tilt_max_deg = 17.0;    // 最大倾斜角度，例如 45 度
-    const double tilt_max_rad = tilt_max_deg * 3.1415926 / 180.0;
-    // 计算四元数约束边界值: (1 - cos(theta)) / 2
-    const double q_sq_bound = (1.0 - cos(tilt_max_rad)) / 2.0;
 
     // Model equations
     DifferentialEquation f; 
@@ -57,11 +52,13 @@ int main()
     f << dot(q_x) ==  0.5 * ( w_x * q_w + w_z * q_y - w_y * q_z);
     f << dot(q_y) ==  0.5 * ( w_y * q_w - w_z * q_x + w_x * q_z);
     f << dot(q_z) ==  0.5 * ( w_z * q_w + w_y * q_x - w_x * q_y);
-    // ACADO 代码生成里，控制量需出现在系统方程中才能计入 ACADO_NU。
-    // 这里使用极小系数，保证 sfc_eps 被纳入优化变量，同时不影响动力学。
-    f << dot(v_x) ==  2 * ( q_w * q_y + q_x * q_z ) * T/m + d_x + 1e-4 * sfc_eps;
+    // Keep the soft-constraint slack out of the physical dynamics.
+    // A dummy integrator keeps sfc_eps as an optimization variable without
+    // perturbing the real quadrotor state prediction.
+    f << dot(v_x) ==  2 * ( q_w * q_y + q_x * q_z ) * T/m + d_x;
     f << dot(v_y) ==  2 * ( q_y * q_z - q_w * q_x ) * T/m + d_y;
     f << dot(v_z) ==  ( 1 - 2 * q_x * q_x - 2 * q_y * q_y ) * T/m - g_z + d_z;
+    f << dot(sfc_eps_aux) == sfc_eps;
 
     // Reference functions and weighting matrices
     Function h, hN;
@@ -164,9 +161,12 @@ int main()
     //ocp.subjectTo( q_x * q_x + q_y * q_y <= q_sq_bound );
 
     //sfc约束：p_x, p_y, p_z 需要满足 c_x * p_x + c_y * p_y + c_z * p_z + c_d <= 0
-    for (int i = 0; i < kSfcMaxPlanes; ++i) {
-        ocp.subjectTo(c_x[i] * p_x + c_y[i] * p_y + c_z[i] * p_z + c_d[i] - sfc_eps <= 0.0);
-    }
+    // Temporarily disable SFC path constraints to isolate whether the
+    // long-horizon prediction instability comes from NMPC itself or from
+    // the corridor constraints/slack handling.
+    // for (int i = 0; i < kSfcMaxPlanes; ++i) {
+    //     ocp.subjectTo(c_x[i] * p_x + c_y[i] * p_y + c_z[i] * p_z + c_d[i] - sfc_eps <= 0.0);
+    // }
 
     ocp.setNOD(3 + 4 * kSfcMaxPlanes);
 
@@ -186,6 +186,7 @@ int main()
         ocp.subjectTo( AT_START, w_x ==  0.0 );
         ocp.subjectTo( AT_START, w_y ==  0.0 );
         ocp.subjectTo( AT_START, w_z ==  0.0 );
+        ocp.subjectTo( AT_START, sfc_eps_aux ==  0.0 );
 
 
         // Setup some visualization

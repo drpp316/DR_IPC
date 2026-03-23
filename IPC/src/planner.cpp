@@ -198,7 +198,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
     }
 
     //SFC 约束步长设置
-    ros::Time t_start = ros::Time::now();
+    ros::WallTime t_start = ros::WallTime::now();
     int sfc_steps = sfc_apply_steps_;
     if (sfc_steps < 0) {
         sfc_steps = 0;
@@ -217,10 +217,10 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
             replan_flag_ = false;
             PathReplan(false);
         }
-        log_times_[1] = (ros::Time::now() - t_start).toSec() * 1000.0;
+        log_times_[1] = (ros::WallTime::now() - t_start).toSec() * 1000.0;
 
         // Feed NMPC with A* references and SFC corridor-constrained horizon goals.
-        ros::Time sfc_start = ros::Time::now();
+        ros::WallTime sfc_start = ros::WallTime::now();
         if (follow_path_.size() > 0) { // follow A* path
             double min_dis = 10000.0;
             for (int i = 0; i < follow_path_.size(); i++) { // find the nearest point
@@ -233,6 +233,13 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
 
             int goal_in_sfc = astar_index_;
             Update_SfC(sfc_steps, goal_in_sfc);//sfc
+            const double goal_dist_xy =
+                (follow_path_.back().head<2>() - odom_p_.head<2>()).norm();
+            const bool freeze_yaw_near_goal =
+                yaw_ctrl_flag_ && goal_dist_xy < yaw_freeze_goal_dist_;
+            if (freeze_yaw_near_goal) {
+                yaw_r_ = yaw_;
+            }
 
             // MPC set goal p/v/yaw
             mpc_goals_.clear();
@@ -258,20 +265,24 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
 
                 double yaw_ref_step = last_yaw_ref;
                 if (yaw_ctrl_flag_) {
-                    int next_index = index + std::max(1, ref_dis_);
-                    if (next_index >= follow_path_.size()) next_index = follow_path_.size() - 1;
-                    const Eigen::Vector3d dir = follow_path_[next_index] - follow_path_[index];
                     auto wrap_pi = [](double a) {
                         while (a > M_PI) a -= 2.0 * M_PI;
                         while (a < -M_PI) a += 2.0 * M_PI;
                         return a;
                     };
-                    if (dir.head<2>().norm() > 1e-3) {
-                        const double yaw_target = std::atan2(dir.y(), dir.x());
-                        const double yaw_delta = wrap_pi(yaw_target - yaw_);
-                        yaw_ref_step = yaw_ + yaw_delta;
+                    if (freeze_yaw_near_goal) {
+                        yaw_ref_step = yaw_r_;
                     } else {
-                        yaw_ref_step = yaw_r_;//“全局方向”
+                        int next_index = index + std::max(1, ref_dis_);
+                        if (next_index >= follow_path_.size()) next_index = follow_path_.size() - 1;
+                        const Eigen::Vector3d dir = follow_path_[next_index] - follow_path_[index];
+                        if (dir.head<2>().norm() > 1e-3) {
+                            const double yaw_target = std::atan2(dir.y(), dir.x());
+                            const double yaw_delta = wrap_pi(yaw_target - yaw_);
+                            yaw_ref_step = yaw_ + yaw_delta;
+                        } else {
+                            yaw_ref_step = yaw_r_;//“全局方向”
+                        }
                     }
                     const double max_step_dyaw = std::max(0.05, yaw_rate_limit_) * mpc_->MPC_STEP;
                     double dyaw_step = wrap_pi(yaw_ref_step - last_yaw_ref);
@@ -306,7 +317,8 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
             AstarPublish(mpc_goals_, 3, 0.1);
 
             // yaw control
-            if (astar_index_ < follow_path_.size() - 0.3 / path_dis_) {
+            if (!freeze_yaw_near_goal &&
+                astar_index_ < follow_path_.size() - 0.3 / path_dis_) {
                 yaw_r_ = std::atan2(follow_path_.back().y()-odom_p_.y(), follow_path_.back().x()-odom_p_.x());
                 // yaw_r_ = std::atan2(follow_path_[astar_index_+ref_dis_].y()-odom_p_.y(), follow_path_[astar_index_+ref_dis_].x()-odom_p_.x());
             }
@@ -322,7 +334,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
                           mpc_->MPC_HORIZON, yaw_r_);
             AstarPublish(mpc_goals_, 3, 0.1);
         }
-        log_times_[2] = (ros::Time::now() - sfc_start).toSec() * 1000.0;
+        log_times_[2] = (ros::WallTime::now() - sfc_start).toSec() * 1000.0;
     }
 
     if (mode_ == Hover) {
@@ -346,7 +358,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
     
 
     // calculate NMPC
-    ros::Time mpc_start = ros::Time::now();
+    ros::WallTime mpc_start = ros::WallTime::now();
 
     mpc_->SetStatus(odom_p_, odom_v_, odom_a_);
 
@@ -354,7 +366,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
     Eigen::Vector3d w_cmd_last;
     mpc_->GetBodyrateCmd(w_cmd_last, T_cmd_last);
 
-    Eigen::VectorXd y = Eigen::VectorXd::Zero(ACADO_NX);
+    Eigen::VectorXd y = Eigen::VectorXd::Zero(10);
     y << odom_p_.x(), odom_p_.y(), odom_p_.z(),
          odom_q_.w(), odom_q_.x(), odom_q_.y(), odom_q_.z(),
          odom_v_.x(), odom_v_.y(), odom_v_.z();
@@ -380,7 +392,7 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
 
 
     bool success_flag = mpc_->Run();
-    log_times_[3] = (ros::Time::now() - mpc_start).toSec() * 1000.0;
+    log_times_[3] = (ros::WallTime::now() - mpc_start).toSec() * 1000.0;
 
     //rviz 显示NMPC预测的轨迹
     if (success_flag) {
@@ -430,9 +442,9 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
     while (timed_thrust_.size() > 100) {
         timed_thrust_.pop();
     }
-    //log_times_[4] = (ros::Time::now() - df_start).toSec() * 1000.0;
+    //log_times_[4] = (ros::WallTime::now() - df_start).toSec() * 1000.0;
 
-    // log_times_[0] = (ros::Time::now() - t_start).toSec() * 1000.0;
+    // log_times_[0] = (ros::WallTime::now() - t_start).toSec() * 1000.0;
     WriteLogTime();
     timer_mutex_.unlock();
 }
@@ -716,7 +728,7 @@ void PlannerClass::PathReplan(bool extend)
     msg.pose.position.z = follow_path_.back().z();    
     goal_pub_.publish(msg);
 
-    ros::Time now = ros::Time::now();
+    ros::WallTime now = ros::WallTime::now();
     local_astar_->Reset(); // reset astar data at the end
     // std::cout << "astar reset time is: " << (ros::Time::now() - now).toSec()*1000 << " ms. " << std::endl;
 }
@@ -774,7 +786,7 @@ void PlannerClass::LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 {
     local_pc_mutex_.lock();
 
-    ros::Time now = ros::Time::now();
+    ros::WallTime now = ros::WallTime::now();
     local_pc_.clear();
     pcl::PointCloud<pcl::PointXYZ> cloud;
     pcl::fromROSMsg(*msg, cloud);
@@ -834,7 +846,7 @@ void PlannerClass::LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
         gird_map_pub_.publish(map_msg);
     }
 
-    log_times_[0] = (ros::Time::now() - now).toSec() * 1000.0;
+    log_times_[0] = (ros::WallTime::now() - now).toSec() * 1000.0;
 
     local_pc_mutex_.unlock();
 }

@@ -2,7 +2,7 @@
 simulation: true
 perfect_simu: false
 frequency: 100.0
-ctrl_delay: 0.0
+ctrl_delay: 0.01
 sfc_dis: 0.3
 
 thrust_limit: 0.98
@@ -12,6 +12,7 @@ uav_mass: 1.735
 
 yaw_ctrl_flag: true
 yaw_gain: 0.6
+yaw_freeze_goal_dist: 0.4
 
 goal_x: 0.0
 goal_y: 0.0
@@ -31,7 +32,8 @@ fsm:
   ref_dis: 2 # 每个MPC步长跳过2个路径点
   path_dis: 0.05 # 路径点间距0.05m
   ref_v_max: 1.2 # 参考速度上限(m/s)，限制送入NMPC的v_ref
-#v_r = ref_dis * path_dis / MPC_STEP = 2 * 0.05 / 0.1 = 1.0 m/s
+#v_r = ref_dis * path_dis / MPC_STEP = 2 * 0.05 / 0.01 = 10.0 m/s
+#但最终会被 ref_v_max 限制到 1.2 m/s
 
 mpc:
   disturbance_alpha: 0.1
@@ -40,12 +42,12 @@ mpc:
   disturbance_limit_z: 100.0
 
   log_sfc_constraints: true
-  sfc_active_planes: 5 # 先保留10个最有效约束面
-  sfc_apply_steps: 2 # 先只对最近1个预测步启用SFC，优先保证可行性
+  sfc_active_planes: 10 # 先保留10个最有效约束面
+  sfc_apply_steps: 10 # 先只对最近1个预测步启用SFC，优先保证可行性
 
-  horizon: 15 # 运行时有效预测步长(<=ACADO_N=20)
-  step: 0.1
-  pred_vis_steps: 8 # RViz显示预测前8步(k=0..8)
+  horizon: 20 # 运行时有效预测步长(与ACADO_N保持一致, 总预测时域0.2s)
+  step: 0.05 #与acado一致
+  pred_vis_steps: 10 # RViz显示预测前？步
 
   R_p: 10.0
   R_v: 3
@@ -60,10 +62,10 @@ mpc:
 
   R_w: 2
   R_T: 0.5
-  R_sfc_eps: 0.1 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
-  sfc_eps_max: 150.0 # 单步最大可允许SFC违反量；法向量近似归一化时可理解为15cm
+  R_sfc_eps: 0.01 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
+  sfc_eps_max: 500.0 # 单步最大可允许SFC违反量；法向量近似归一化时可理解为15cm
   wx_max: 1.0
   wy_max: 1.0
-  wz_max: 1.0
+  wz_max: 2.0
   T_min: 1.0
   T_max: 40.0

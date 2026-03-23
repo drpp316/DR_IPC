@@ -146,6 +146,9 @@ public:
         current_states_(7) = static_cast<real_t>(v0.x());
         current_states_(8) = static_cast<real_t>(v0.y());
         current_states_(9) = static_cast<real_t>(v0.z());
+        if (ACADO_NX > 10) {
+            current_states_.segment(10, ACADO_NX - 10).setZero();
+        }
 
         X_0_.head<3>() = p0;
         X_0_.segment<3>(3) = v0;
