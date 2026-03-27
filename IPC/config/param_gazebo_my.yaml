@@ -18,12 +18,12 @@ goal_x: 0.0
 goal_y: 0.0
 goal_z: 1.0
 
-eso_bandwidth: 0.5
+eso_bandwidth: 2.0 #观测器极点
 
 astar:
   resolution: 0.2
-  map_x_size: 10.0
-  map_y_size: 10.0
+  map_x_size: 10.0 #局部地图尺寸，单位米
+  map_y_size: 10.0 #局部地图尺寸，单位米
   map_z_size: 3.0 #天花板高度
   expand_dyn: 0.4 #   用于**A\*路径规划时**的障碍物膨胀。规划时膨胀更大，让路径离障碍物更远，留出余量。
   expand_fix: 0.2 #   用于**实时检测当前路径是否碰到障碍物**，触发重规划。固定值，代表无人机物理安全距离。
@@ -31,15 +31,15 @@ astar:
 fsm:
   ref_dis: 2 # 每个MPC步长跳过2个路径点
   path_dis: 0.05 # 路径点间距0.05m
-  ref_v_max: 1.2 # 参考速度上限(m/s)，限制送入NMPC的v_ref
+  ref_v_max: 10 # 参考速度上限(m/s)，限制送入NMPC的v_ref 1.2
 #v_r = ref_dis * path_dis / MPC_STEP = 2 * 0.05 / 0.01 = 10.0 m/s
 #但最终会被 ref_v_max 限制到 1.2 m/s
 
 mpc:
-  disturbance_alpha: 0.1
-  disturbance_alpha_z: 0.1
-  disturbance_limit: 100.0
-  disturbance_limit_z: 100.0
+  disturbance_alpha: 0.0
+  disturbance_alpha_z: 0.0
+  disturbance_limit: 1000.0
+  disturbance_limit_z: 1000.0
 
   log_sfc_constraints: true
   sfc_active_planes: 10 # 先保留10个最有效约束面

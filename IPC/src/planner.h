@@ -21,6 +21,7 @@
 #include <quadrotor_msgs/PositionCommand.h>
 #include <mavros_msgs/AttitudeTarget.h>
 #include <mavros_msgs/RCIn.h>
+#include <mavros_msgs/State.h>
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -125,6 +126,7 @@ public:
         goal_sub_ = nh.subscribe<geometry_msgs::PoseStamped>("goal", 1, &PlannerClass::GoalCallback, this, ros::TransportHints().tcpNoDelay());
         imu_sub_ = nh.subscribe<sensor_msgs::Imu>("imu", 1, &PlannerClass::IMUCallback, this, ros::TransportHints().tcpNoDelay());
         rc_sub_ = nh.subscribe<mavros_msgs::RCIn>("rc_in", 1, &PlannerClass::RCInCallback, this, ros::TransportHints().tcpNoDelay());
+        state_sub_ = nh.subscribe<mavros_msgs::State>("/mavros/state", 1, &PlannerClass::StateCallback, this, ros::TransportHints().tcpNoDelay());
 
         timer_ = nh.createTimer(ros::Duration(1.0/freq), &PlannerClass::TimerCallback, this, false, true);
 
@@ -195,6 +197,8 @@ public:
     }
 
 private:
+    int ClampSfcSteps() const;
+    void UpdateCommandModeGoalsAndSfc(int sfc_steps);
     void AstarPublish(std::vector<Eigen::Vector3d>& nodes, uint8_t type, double scale) {
         visualization_msgs::Marker node_vis; 
         node_vis.header.frame_id = "world";
@@ -475,6 +479,7 @@ private:
     void IMUCallback(const sensor_msgs::ImuConstPtr& msg);
     void LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
     void RCInCallback(const mavros_msgs::RCInConstPtr& msg);
+    void StateCallback(const mavros_msgs::State::ConstPtr& msg);
 
     void TimerCallback(const ros::TimerEvent &);
 
@@ -495,7 +500,7 @@ private:
                               const Eigen::Vector3d* ref_p = nullptr);
 
     ros::Timer      timer_;
-    ros::Subscriber odom_sub_, goal_sub_, imu_sub_, local_pc_sub_, rc_sub_;
+    ros::Subscriber odom_sub_, goal_sub_, imu_sub_, local_pc_sub_, rc_sub_, state_sub_;
     ros::Publisher  gird_map_pub_, astar_pub_, cmd_pub_, sfc_pub_, mpc_path_pub_, px4ctrl_pub_, goal_pub_;
     ros::Time       odom_time_, last_mpc_time_;
     std::mutex  odom_mutex_, goal_mutex_, cloud_mutex_, timer_mutex_, imu_mutex_, 
@@ -505,6 +510,8 @@ private:
 
     bool simu_flag_, perfect_simu_flag_, pc_ctrl_flag_, hover_esti_flag_, yaw_ctrl_flag_;
     bool has_map_flag_{false}, has_odom_flag_{false}, replan_flag_{false}, new_goal_flag_{false};
+    bool vehicle_armed_{false};
+    bool vehicle_offboard_{false};
     double resolution_;
     double ctrl_delay_;
     double thrust_limit_, hover_perc_;
