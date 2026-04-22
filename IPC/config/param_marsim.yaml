@@ -1,0 +1,76 @@
+#----------------- MPC param for MARS UAV Sim -----------------#
+simulation: true
+perfect_simu: false
+frequency: 100.0
+ctrl_delay: 0.0
+sfc_dis: 0.3
+
+thrust_limit: 0.4
+hover_esti: true
+hover_perc: 0.7
+uav_mass: 0.98
+
+yaw_ctrl_flag: true
+yaw_gain: 0.5
+
+goal_x: 0.0
+goal_y: 0.0
+goal_z: 1.0
+min_goal_z: 0.5 # 目标高度下限(避免贴地/落入未知点云区域)，GoalCallback/PathReplan都会夹到该高度
+
+dob:
+  eso_bandwidth: 2.0 # 干扰观测器极点(带宽)2.0
+  kf_process_noise_scale: 3.0 # Q缩放(大一点=滤波更少, 更跟测量)
+  kf_measurement_noise_scale: 0.1 # R缩放(小一点=更信任测量)
+
+  interconnected_mode: false # KF<->DOB互联：KF滤波DOB状态，DOB反哺KF干扰
+  use_kf_state_for_nmpc: false # NMPC状态源开关：false=里程计测量状态，true=使用KF滤波后的[p,v]
+  use_kf_attitude_for_nmpc: false # NMPC姿态源开关：false=里程计姿态，true=KF滤波四元数
+
+  require_mavros_state_for_dob: true #  true  关闭DOB； false 开启 DOB
+
+astar:
+  resolution: 0.1
+  map_x_size: 20.0
+  map_y_size: 20.0
+  map_z_size: 3.0
+  expand_dyn: 0.5
+  expand_fix: 0.3
+
+fsm:
+  ref_dis: 2 # 每个MPC步长跳过2个路径点
+  path_dis: 0.05 # 路径点间距0.05m
+  ref_v_max: 0.5 # 参考速度上限(m/s)，限制送入NMPC的v_ref
+
+mpc:
+  horizon: 20 # 运行时有效预测步长(与ACADO_N保持一致, 总预测时域1s)
+  step: 0.05 #与acado一致
+  model_mass: 0.98 # MARS so3_quadrotor mass (must match, otherwise thrust mapping is wrong)
+
+  #权重
+  R_p: 30.0
+  R_v: 4
+
+  R_yaw: 10.0 #偏航角增益
+  R_phi: 5.0 #其余的姿态角增益
+
+  R_pN: 5.0
+  R_vN: 1.0
+  R_yawN: 8.0
+  R_phiN: 1.0
+
+  R_w: 3
+  R_T: 0.5
+  R_sfc_eps: 5 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
+
+  #约束
+  sfc_eps_max: 10.0 # 单步最大可允许SFC违反量；法向量近似归一化时可理解为15cm
+  wx_max: 0.70
+  wy_max: 0.70
+  wz_max: 3.0
+  T_min: 0.1
+  T_max: 40.0
+
+  sfc_active_planes: 0 # 先保留15个最有效约束面
+  sfc_apply_steps: 5 # 先只对最近k个预测步启用SFC，优先保证可行性
+  log_sfc_constraints: false #记录SFC约束相关数据，供后续分析

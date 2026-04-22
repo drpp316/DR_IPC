@@ -7,11 +7,13 @@
 #include <fstream>
 #include <ctime>
 #include <iomanip>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <tf/tf.h>
 
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -58,7 +60,22 @@ public:
         nh.param("/ipc2_node/hover_esti", hover_esti_flag_, true);
         nh.param("/ipc2_node/hover_perc", hover_perc_, 0.23);
         nh.param("/ipc2_node/uav_mass", uav_mass_, 1.5);
-        nh.param("/ipc2_node/eso_bandwidth", eso_bandwidth_, 1.2);
+        if (!nh.getParam("/ipc2_node/dob/eso_bandwidth", eso_bandwidth_)) {
+            nh.param("/ipc2_node/eso_bandwidth", eso_bandwidth_, 1.2); // backward-compatible
+        }
+        bool dob_interconnected = true;
+        if (!nh.getParam("/ipc2_node/dob/interconnected_mode", dob_interconnected)) {
+            nh.param("/ipc2_node/mpc/dob_interconnected_mode", dob_interconnected, true); // backward-compatible
+        }
+        double kf_q_scale = 2.0;   // larger Q => less smoothing, faster tracking
+        double kf_r_scale = 0.5;   // smaller R => trust measurement more
+        nh.param("/ipc2_node/dob/kf_process_noise_scale", kf_q_scale, kf_q_scale);
+        nh.param("/ipc2_node/dob/kf_measurement_noise_scale", kf_r_scale, kf_r_scale);
+        if (!nh.getParam("/ipc2_node/dob/use_kf_state_for_nmpc", use_kf_state_for_nmpc_)) {
+            nh.param("/ipc2_node/use_kf_state_for_nmpc", use_kf_state_for_nmpc_, false); // backward-compatible
+        }
+        nh.param("/ipc2_node/dob/use_kf_attitude_for_nmpc", use_kf_attitude_for_nmpc_, false);
+        nh.param("/ipc2_node/dob/require_mavros_state_for_dob", require_mavros_state_for_dob_, true);
         nh.param("/ipc2_node/yaw_ctrl_flag", yaw_ctrl_flag_, false);
         nh.param("/ipc2_node/yaw_gain", yaw_gain_, 0.1);
         double yaw_rate_limit_default = 0.5;
@@ -68,6 +85,7 @@ public:
         nh.param("/ipc2_node/goal_x", goal_p_.x(), 0.0);
         nh.param("/ipc2_node/goal_y", goal_p_.y(), 0.0);
         nh.param("/ipc2_node/goal_z", goal_p_.z(), 1.0);
+        nh.param("/ipc2_node/min_goal_z", min_goal_z_, 0.5);
         Eigen::Vector3d map_size, map_low, map_upp;
         nh.param("/ipc2_node/astar/resolution", resolution_, 0.1);
         nh.param("/ipc2_node/astar/map_x_size", map_size.x(), 10.0);
@@ -81,7 +99,9 @@ public:
         nh.param("/ipc2_node/fsm/ref_dis", ref_dis_, 1);
         nh.param("/ipc2_node/fsm/path_dis", path_dis_, 0.1);
         nh.param("/ipc2_node/fsm/ref_v_max", ref_v_max_, 1.2);
-        nh.param("/ipc2_node/mpc/pred_vis_steps", pred_vis_steps_, 8);
+        if (!nh.getParam("/ipc2_node/pred_vis_steps", pred_vis_steps_)) {
+            nh.param("/ipc2_node/mpc/pred_vis_steps", pred_vis_steps_, 8); // backward-compatible
+        }
         nh.param("/ipc2_node/mpc/sfc_apply_steps", sfc_apply_steps_, 8);
         nh.param("/ipc2_node/mpc/log_sfc_constraints", log_sfc_constraints_, false);
         if (pred_vis_steps_ < 1) pred_vis_steps_ = 1;
@@ -102,6 +122,9 @@ public:
             thrust_ = hover_perc_;
             mode_ = Manual;
         }
+        ROS_INFO("[IPC2] simu_flag=%d perfect_simu=%d init_mode=%d goal_init=[%.2f %.2f %.2f]",
+                 static_cast<int>(simu_flag_), static_cast<int>(perfect_simu_flag_),
+                 static_cast<int>(mode_), goal_p_.x(), goal_p_.y(), goal_p_.z());
         thr2acc_ = 9.81 / thrust_;
 
         mpc_   = std::make_shared<MPCPlannerClass>(nh);
@@ -111,6 +134,16 @@ public:
 
         disturbance_observer_ = DisturbanceObserver(1.0 / freq);
         disturbance_observer_.setOmega(eso_bandwidth_);
+        disturbance_observer_.setInterconnectedMode(dob_interconnected);
+        disturbance_observer_.setKalmanNoiseScale(kf_q_scale, kf_r_scale);
+        ROS_INFO("[IPC2] DOB interconnected mode: %d", static_cast<int>(dob_interconnected));
+        ROS_INFO("[IPC2] KF noise scales: Q=%.3f, R=%.3f", kf_q_scale, kf_r_scale);
+        ROS_INFO("[IPC2] DOB requires MAVROS state: %d",
+                 static_cast<int>(require_mavros_state_for_dob_));
+        ROS_INFO("[IPC2] NMPC p/v source: %s, attitude source: %s",
+                 use_kf_state_for_nmpc_ ? "KF-filtered state" : "raw odom measurement",
+                 use_kf_attitude_for_nmpc_ ? "KF-filtered attitude" : "raw odom attitude");
+        kf_state_latest_ = Eigen::VectorXd::Zero(10);
 
         // ros topic
         astar_pub_ = nh.advertise<visualization_msgs::Marker>("astar_path", 1);
@@ -120,6 +153,7 @@ public:
         sfc_pub_ = nh.advertise<visualization_msgs::MarkerArray>("sfc", 1);
         px4ctrl_pub_ = nh.advertise<mavros_msgs::AttitudeTarget>("px4ctrl", 1);
         goal_pub_ = nh.advertise<geometry_msgs::PoseStamped>("goal_pub", 1);
+        disturbance_hat_pub_ = nh.advertise<geometry_msgs::Vector3Stamped>("disturbance_hat", 1);
 
         local_pc_sub_ = nh.subscribe<sensor_msgs::PointCloud2>("local_pc", 1, &PlannerClass::LocalPcCallback, this, ros::TransportHints().tcpNoDelay());
         odom_sub_ = nh.subscribe<nav_msgs::Odometry>("odom", 1, &PlannerClass::OdomCallback, this, ros::TransportHints().tcpNoDelay());
@@ -128,7 +162,8 @@ public:
         rc_sub_ = nh.subscribe<mavros_msgs::RCIn>("rc_in", 1, &PlannerClass::RCInCallback, this, ros::TransportHints().tcpNoDelay());
         state_sub_ = nh.subscribe<mavros_msgs::State>("/mavros/state", 1, &PlannerClass::StateCallback, this, ros::TransportHints().tcpNoDelay());
 
-        timer_ = nh.createTimer(ros::Duration(1.0/freq), &PlannerClass::TimerCallback, this, false, true);
+        timer_ = nh.createTimer(ros::Duration(1.0 / freq), &PlannerClass::TimerCallback, this, false, true);
+        ROS_INFO("[IPC2] single-rate timer = %.1fHz", freq);
 
         std::string file = ros::package::getPath("ipc2") + "/config";
         write_time_.open((file+"/time_consuming.csv"), std::ios::out | std::ios::trunc);
@@ -139,7 +174,7 @@ public:
         std::strftime(start_time_str, sizeof(start_time_str), "%Y-%m-%d %H:%M:%S",
                       std::localtime(&wall_now));
         write_time_ << "run_start_time," << start_time_str << std::endl;
-        write_time_ << "mapping" << ", " << "replan" << ", " << "sfc" << ", " << "mpc" << ", " << "df" << ", " << std::endl;
+        write_time_ << "mapping" << ", " << "replan" << ", " << "sfc" << ", " << "NMPC" << std::endl;
 
         write_nmpc_.open((file + "/nmpc_debug.csv"), std::ios::out | std::ios::trunc);
         write_nmpc_ << std::fixed << std::setprecision(6);
@@ -148,7 +183,8 @@ public:
         write_nmpc_ << "t_run,"
                     << "px,py,pz,vx,vy,vz,qw,qx,qy,qz,"
                     << "wx_cmd,wy_cmd,wz_cmd,T_cmd,thrust_norm,sfc_eps_cmd,"
-                    << "d_hat_x,d_hat_y,d_hat_z,run_ok"
+                    << "d_hat_x,d_hat_y,d_hat_z,"
+                    << "run_ok"
                     << std::endl;
 
         write_nmpc_pred_.open((file + "/nmpc_pred_debug.csv"), std::ios::out | std::ios::trunc);
@@ -199,6 +235,14 @@ public:
 private:
     int ClampSfcSteps() const;
     void UpdateCommandModeGoalsAndSfc(int sfc_steps);
+    void RunMainLoop(int sfc_steps,
+                     const Eigen::Vector3d& d_hat,
+                     const ros::Time& ros_now,
+                     const ros::WallTime& wall_start);
+    Eigen::Vector3d UpdateDisturbanceEstimate(const Eigen::Vector3d& cmd_rate,
+                                             double cmd_thrust);
+    void PublishCompensatedControl(const Eigen::Vector3d& d_hat_live,
+                                   const ros::Time& stamp);
     void AstarPublish(std::vector<Eigen::Vector3d>& nodes, uint8_t type, double scale) {
         visualization_msgs::Marker node_vis; 
         node_vis.header.frame_id = "world";
@@ -295,7 +339,7 @@ private:
         mpc_path_pub_.publish(msg);
     }
     void WriteLogTime(void) {
-        for (int i = 0; i < log_times_.size(); i++) {
+        for (int i = 0; i < 4 && i < static_cast<int>(log_times_.size()); i++) {
             write_time_ << log_times_[i] << ", ";
             log_times_[i] = 0.0;
         }
@@ -502,6 +546,7 @@ private:
     ros::Timer      timer_;
     ros::Subscriber odom_sub_, goal_sub_, imu_sub_, local_pc_sub_, rc_sub_, state_sub_;
     ros::Publisher  gird_map_pub_, astar_pub_, cmd_pub_, sfc_pub_, mpc_path_pub_, px4ctrl_pub_, goal_pub_;
+    ros::Publisher  disturbance_hat_pub_;
     ros::Time       odom_time_, last_mpc_time_;
     std::mutex  odom_mutex_, goal_mutex_, cloud_mutex_, timer_mutex_, imu_mutex_, 
                 local_pc_mutex_, rc_mutex_;
@@ -551,6 +596,7 @@ private:
 
     double thr2acc_;
     double uav_mass_;
+    double min_goal_z_{0.5};
     double eso_bandwidth_;
     double thrust_;
     double P_{100.0};
@@ -566,6 +612,18 @@ private:
 
     DisturbanceObserver disturbance_observer_;
     bool disturbance_inited_{false};
+    bool require_mavros_state_for_dob_{true};
+    bool use_kf_state_for_nmpc_{false};
+    bool use_kf_attitude_for_nmpc_{false};
+    bool has_kf_state_{false};
+    Eigen::VectorXd kf_state_latest_;
+    bool last_nmpc_success_{false};
+    Eigen::Vector3d disturbance_latest_{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d last_rate_cmd_nominal_{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d last_rate_cmd_sent_{Eigen::Vector3d::Zero()};
+    double last_thrust_cmd_nominal_{0.0};
+    double last_thrust_cmd_sent_{0.0};
+    double last_sfc_eps_cmd_{0.0};
 };
 
 #endif

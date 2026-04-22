@@ -118,15 +118,6 @@ public:
             control_upper_bound_(4) = std::max(0.0, sfc_eps_max);
         }
 
-        nh.param("/ipc2_node/mpc/disturbance_alpha", disturbance_alpha_, 0.1);
-        nh.param("/ipc2_node/mpc/disturbance_alpha_z", disturbance_alpha_z_, 0.1);
-
-        nh.param("/ipc2_node/mpc/disturbance_limit", disturbance_limit_, 100.0);
-        nh.param("/ipc2_node/mpc/disturbance_limit_z", disturbance_limit_z_, 100.0);
-
-        disturbance_alpha_ = std::max(0.0, std::min(1.0, disturbance_alpha_));
-        disturbance_alpha_z_ = std::max(0.0, std::min(1.0, disturbance_alpha_z_));
-
         nh.param("/ipc2_node/mpc/sfc_active_planes", sfc_active_planes_, kSfcMaxPlanes);
         sfc_active_planes_ = std::max(1, std::min(kSfcMaxPlanes, sfc_active_planes_));
 
@@ -195,19 +186,7 @@ public:
     }
 
     void SetDisturbance(const Eigen::Vector3d& d) {
-        Eigen::Vector3d filtered = disturbance_filtered_;
-        filtered.head<2>() = disturbance_alpha_ * disturbance_filtered_.head<2>()
-                           + (1.0 - disturbance_alpha_) * d.head<2>();
-        filtered(2) = disturbance_alpha_z_ * disturbance_filtered_(2)
-                    + (1.0 - disturbance_alpha_z_) * d(2);
-
-        for (int i = 0; i < 2; ++i) {
-            filtered(i) = std::max(-disturbance_limit_,
-                                   std::min(disturbance_limit_, filtered(i)));
-        }
-        filtered(2) = std::max(-disturbance_limit_z_,
-                               std::min(disturbance_limit_z_, filtered(2)));
-        disturbance_filtered_ = filtered;
+        disturbance_filtered_ = d;
         RefreshOnlineData();
     }
 
@@ -251,6 +230,43 @@ public:
         w_cmd << current_control_(0), current_control_(1), current_control_(2);
         T_cmd = current_control_(3);
     }
+
+    // Access predicted NMPC state at stage k (0..MPC_HORIZON).
+    // State layout follows current_states_: [p(0:2), q(wxyz)(3:6), v(7:9), ...].
+    bool GetPredictedPVQ(int k,
+                         Eigen::Vector3d& p,
+                         Eigen::Vector3d& v,
+                         Eigen::Quaterniond& q) const {
+        if (k < 0) k = 0;
+        if (k > MPC_HORIZON) k = MPC_HORIZON;
+        const int base = k * ACADO_NX;
+        if (base + 9 >= (ACADO_N + 1) * ACADO_NX) {
+            return false;
+        }
+
+        p << acadoVariables.x[base + 0],
+             acadoVariables.x[base + 1],
+             acadoVariables.x[base + 2];
+
+        // Quaternion stored as w,x,y,z
+        q = Eigen::Quaterniond(acadoVariables.x[base + 3],
+                               acadoVariables.x[base + 4],
+                               acadoVariables.x[base + 5],
+                               acadoVariables.x[base + 6]);
+        if (q.coeffs().allFinite() && q.norm() > 1e-6) {
+            q.normalize();
+        } else {
+            q.setIdentity();
+        }
+
+        v << acadoVariables.x[base + 7],
+             acadoVariables.x[base + 8],
+             acadoVariables.x[base + 9];
+
+        return p.allFinite() && v.allFinite();
+    }
+
+    double GetModelMass() const { return model_mass_; }
 
     double GetSfcSlackCmd() const {
         if (ACADO_NU > 4) {
@@ -497,10 +513,6 @@ private:
 
     MpcWrapper mpc_wrapper_;
     double model_mass_{1.735};
-    double disturbance_alpha_{0.8};
-    double disturbance_limit_{5.0};
-    double disturbance_alpha_z_{0.95};
-    double disturbance_limit_z_{2.0};
     int sfc_active_planes_{kSfcMaxPlanes};
     Eigen::Vector3d disturbance_filtered_{Eigen::Vector3d::Zero()};
 

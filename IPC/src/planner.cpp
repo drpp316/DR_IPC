@@ -40,6 +40,32 @@ PlaneViolationInfo EvaluatePlaneViolation(
     return info;
 }
 
+Eigen::Matrix<double, Eigen::Dynamic, 4> OrientPlanesToContainPoint(
+    const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+    const Eigen::Vector3d& interior_point,
+    int* flipped_count = nullptr,
+    double tol = 1e-6)
+{
+    Eigen::Matrix<double, Eigen::Dynamic, 4> out = planes;
+    int flipped = 0;
+    for (int i = 0; i < out.rows(); ++i) {
+        const double val = out(i, 0) * interior_point.x() +
+                           out(i, 1) * interior_point.y() +
+                           out(i, 2) * interior_point.z() +
+                           out(i, 3);
+        // SFC convention in this project: a*x + b*y + c*z + d <= 0 means inside.
+        // If an interior point violates this row, flip plane direction.
+        if (val > tol) {
+            out.row(i) = -out.row(i);
+            ++flipped;
+        }
+    }
+    if (flipped_count != nullptr) {
+        *flipped_count = flipped;
+    }
+    return out;
+}
+
 Eigen::Matrix<double, Eigen::Dynamic, 4> FilterAndSortPlanes(
     const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
     const Eigen::Vector3d& p,
@@ -83,12 +109,11 @@ Eigen::Matrix<double, Eigen::Dynamic, 4> FilterAndSortPlanes(
 
 void PlannerClass::TimerCallback(const ros::TimerEvent &)
 {
-
     timer_mutex_.lock();
-    //mode_ = Command;
 
-    // Keep publishing minimal setpoints before odom is ready,
+    // odom 还没准备好时，先持续发布最小控制量，避免飞控断流
     if (!has_odom_flag_) {
+        ROS_WARN_THROTTLE(1.0, "[IPC2] waiting odom on subscribed topic, timer loop held in safe output.");
         const Eigen::Vector3d zero_rate = Eigen::Vector3d::Zero();
         const double min_thrust = 0.08;
         BodyrateCtrlPub(zero_rate, min_thrust, ros::Time::now());
@@ -98,10 +123,27 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
         return;
     }
 
+    const ros::Time ros_now = ros::Time::now();
+    const ros::WallTime wall_start = ros::WallTime::now();
+    const int sfc_steps = ClampSfcSteps(); //SFC约束到MPC预测第K步。
     
-    ros::WallTime t_start = ros::WallTime::now();
-    const int sfc_steps = ClampSfcSteps();//SFC 约束步长设置
+    disturbance_latest_ = UpdateDisturbanceEstimate(last_rate_cmd_sent_, last_thrust_cmd_sent_); // 获取DOB
+    RunMainLoop(sfc_steps, disturbance_latest_, ros_now, wall_start); // 执行完整规划/求解
+    PublishCompensatedControl(disturbance_latest_, ros_now); // 发布最终控制
 
+    timed_thrust_.push(std::pair<ros::Time, double>(ros::Time::now(), thrust_));
+    while (timed_thrust_.size() > 100) {
+        timed_thrust_.pop();
+    }
+    WriteLogTime();
+    timer_mutex_.unlock();
+}
+
+void PlannerClass::RunMainLoop(int sfc_steps,
+                               const Eigen::Vector3d& d_hat,
+                               const ros::Time& ros_now,
+                               const ros::WallTime& wall_start)
+{
     if (mode_ == Command) {
         /*-----------A*-------------*/ 
         if (new_goal_flag_) {
@@ -109,19 +151,21 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
             replan_flag_ = false;
             PathReplan(true);
         }
-        if (new_goal_flag_ == false && replan_flag_) {
+        // One-shot replan: replan once when flagged, no periodic retry timer.
+        if (!new_goal_flag_ && replan_flag_) {
             replan_flag_ = false;
             PathReplan(false);
         }
-        log_times_[1] = (ros::WallTime::now() - t_start).toSec() * 1000.0;
+        log_times_[1] = (ros::WallTime::now() - wall_start).toSec() * 1000.0;
 
-        /*-----------SFC+参考信号-------------*/ 
-        ros::WallTime sfc_start = ros::WallTime::now();
+        /*-----------SFC+参考信号-------------*/
+        const ros::WallTime sfc_start = ros::WallTime::now();
         UpdateCommandModeGoalsAndSfc(sfc_steps);
         log_times_[2] = (ros::WallTime::now() - sfc_start).toSec() * 1000.0;
     }
 
     if (mode_ == Hover) {
+        // Hover 模式下不走 A* 路径，直接给定点悬停目标
         Clear_SfC(0);
         mpc_goals_.clear();
         for (int i = 0; i < mpc_->MPC_HORIZON; i++) {
@@ -133,55 +177,41 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
         AstarPublish(mpc_goals_, 3, 0.1);
     }
 
-    //空平面
+    // 清掉后半段预测步上的 SFC 约束，保证只有前 sfc_steps 步受约束
     if (mode_ == Command) {
-        Clear_SfC(sfc_steps);//清空MPC，后面步长约束
+        Clear_SfC(sfc_steps);
     } else {
         Clear_SfC(0);
     }
-    
-    /*-----------NMPC求解+DOB计算-------------*/ 
-    ros::WallTime mpc_start = ros::WallTime::now();
-    mpc_->SetStatus(odom_p_, odom_v_, odom_a_);
 
-    double T_cmd_last;
-    Eigen::Vector3d w_cmd_last;
-    mpc_->GetBodyrateCmd(w_cmd_last, T_cmd_last);
+    /*-----------NMPC求解-------------*/
+    const ros::WallTime mpc_start = ros::WallTime::now();
+    Eigen::Vector3d nmpc_p = odom_p_;
+    Eigen::Vector3d nmpc_v = odom_v_;
+    Eigen::Quaterniond nmpc_q = odom_q_;
 
-
-    Eigen::VectorXd y = Eigen::VectorXd::Zero(10);
-    y << odom_p_.x(), odom_p_.y(), odom_p_.z(),
-         odom_q_.w(), odom_q_.x(), odom_q_.y(), odom_q_.z(),
-         odom_v_.x(), odom_v_.y(), odom_v_.z();
-
-    Eigen::VectorXd u = Eigen::VectorXd::Zero(ACADO_NU);
-    if (ACADO_NU > 0) u(0) = w_cmd_last.x();
-    if (ACADO_NU > 1) u(1) = w_cmd_last.y();
-    if (ACADO_NU > 2) u(2) = w_cmd_last.z();
-    if (ACADO_NU > 3) u(3) = T_cmd_last;
-
-    Eigen::Vector3d d_hat = Eigen::Vector3d::Zero();
-    if (vehicle_armed_ && vehicle_offboard_) {//解锁 更新DOB
-        if (!disturbance_inited_) {
-            disturbance_observer_.setFirstZ(y);
-            disturbance_inited_ = true;
-        }
-        disturbance_observer_.kalman_geso_update(y, u, uav_mass_, 9.8066);//DOB计算
-
-        const Eigen::VectorXd d_hat_full = disturbance_observer_.getDisturbance();
-        if (d_hat_full.size() >= 3) {
-            d_hat << d_hat_full(0), d_hat_full(1), d_hat_full(2);
-        }
-    } else {//未解锁时保持零扰动，不更新DOB
-        disturbance_inited_ = false;
+    // NMPC采用KF滤波状态 p，v
+    if (use_kf_state_for_nmpc_ && has_kf_state_ && kf_state_latest_.size() >= 10) {
+        nmpc_p << kf_state_latest_(0), kf_state_latest_(1), kf_state_latest_(2);
+        nmpc_v << kf_state_latest_(7), kf_state_latest_(8), kf_state_latest_(9);
     }
-    mpc_->SetDisturbance(d_hat);
+    // NMPC采用KF滤波状态 姿态
+    if (use_kf_attitude_for_nmpc_ && has_kf_state_ && kf_state_latest_.size() >= 10) {
+        Eigen::Quaterniond q_kf(kf_state_latest_(3), kf_state_latest_(4),
+                                kf_state_latest_(5), kf_state_latest_(6));
+        if (q_kf.coeffs().allFinite() && q_kf.norm() > 1e-6) {
+            nmpc_q = q_kf.normalized();
+        }
+    }
+    mpc_->SetAttitude(nmpc_q);
+    mpc_->SetStatus(nmpc_p, nmpc_v, odom_a_);
+    mpc_->SetDisturbance(d_hat); // NMPC 求解直接使用当前扰动估计
 
-    bool success_flag = mpc_->Run(); //求解NMPC，成功与否由success_flag返回
+    last_nmpc_success_ = mpc_->Run(); // 求解NMPC，成功与否由 last_nmpc_success_ 返回
     log_times_[3] = (ros::WallTime::now() - mpc_start).toSec() * 1000.0;
 
-    //rviz 显示NMPC预测的轨迹
-    if (success_flag) {
+    // rviz 显示NMPC预测的轨迹
+    if (last_nmpc_success_) {
         std::vector<Eigen::Vector3d> path;
         std::vector<Eigen::Vector3d> path_vis;
         std::vector<Eigen::Vector3d> ref_path;
@@ -194,34 +224,121 @@ void PlannerClass::TimerCallback(const ros::TimerEvent &)
             path_vis.assign(path.begin(), path.begin() + keep_n);
         }
         MPCPathPublish(path_vis);
-        WriteNmpcPredDebug(ros::Time::now().toSec(), path, ref_path, success_flag);
+        WriteNmpcPredDebug(ros_now.toSec(), path, ref_path, last_nmpc_success_);
     }
 
-    Eigen::Vector3d w_cmd;
-    double T_cmd;
-    mpc_->GetBodyrateCmd(w_cmd, T_cmd);
-    const double sfc_eps_cmd = mpc_->GetSfcSlackCmd();
+    // 保存这次慢环求解得到的名义控制量，供快环做增量补偿
+    mpc_->GetBodyrateCmd(last_rate_cmd_nominal_, last_thrust_cmd_nominal_);
+    last_sfc_eps_cmd_ = mpc_->GetSfcSlackCmd();
 
-   //计算油门归一化值，供飞控使用。 
-    double thrust_norm = T_cmd / (uav_mass_ * thr2acc_); // 用planner自己估计的thr2acc_
+
+    /*-----------mars——uav——sim支持-------------*/
+    // MARS/so3_controller 链路需要 PositionCommand(p/v/a/jerk)。
+    // 这里不要把 NMPC 的 bodyrate 控制量当成 jerk 去积分（会导致 a/jerk 物理含义错误）。
+    // 我们改为：从 NMPC 预测状态读取 (p,v,q)，再用 (q,T,m) 计算世界系期望加速度：
+    //   a_des = R(q) * [0,0,T/m] - g
+    Eigen::Vector3d p_cmd = odom_p_;
+    Eigen::Vector3d v_cmd = Eigen::Vector3d::Zero();
+    Eigen::Vector3d a_cmd = Eigen::Vector3d::Zero();
+    Eigen::Vector3d j_cmd = Eigen::Vector3d::Zero();
+
+    if (last_nmpc_success_) {
+        Eigen::Vector3d p1, v1;
+        // Fall back to current attitude if predicted buffer isn't available.
+        Eigen::Quaterniond q0 = odom_q_;
+        // Use stage-1 predicted p/v for smoother tracking.
+        if (mpc_->GetPredictedPVQ(1, p1, v1, q0)) {
+            // For simulators (MARS/Gazebo), publish the desired position directly so the
+            // SO3 position loop can remove steady-state offset. In real/bridge mode,
+            // you may want to anchor p_cmd to measurement to avoid setpoint jumps.
+            p_cmd = (simu_flag_ || perfect_simu_flag_) ? p1 : odom_p_;
+            v_cmd = v1;
+        }
+
+        Eigen::Vector3d w_cmd_unused;
+        double T_cmd = 0.0;
+        mpc_->GetBodyrateCmd(w_cmd_unused, T_cmd);
+        const double m = std::max(0.1, mpc_->GetModelMass());
+        const Eigen::Vector3d zb_world = q0 * Eigen::Vector3d::UnitZ(); // body z in world
+        a_cmd = zb_world * (T_cmd / m) - Gravity_;
+    }
+
+    CmdPublish(p_cmd, v_cmd, a_cmd, j_cmd); //发布给 MARS——uav——sim 的 so3
+}
+
+Eigen::Vector3d PlannerClass::UpdateDisturbanceEstimate(const Eigen::Vector3d& cmd_rate,
+                                                        double cmd_thrust)
+{
+    Eigen::Vector3d d_hat = Eigen::Vector3d::Zero();
+    // 可配置是否必须依赖 MAVROS 状态；MARS UAV Sim 常用 /planning/pos_cmd 链路，没有 /mavros/state。
+    const bool dob_state_ready =
+        (!require_mavros_state_for_dob_) || (vehicle_armed_ && vehicle_offboard_);
+    if (!dob_state_ready) {
+        disturbance_inited_ = false;
+        has_kf_state_ = false;
+        return d_hat;
+    }
+
+    // 观测器使用的测量状态 y：位置 + 姿态四元数 + 速度
+    Eigen::VectorXd y = Eigen::VectorXd::Zero(10);
+    y << odom_p_.x(), odom_p_.y(), odom_p_.z(),
+         odom_q_.w(), odom_q_.x(), odom_q_.y(), odom_q_.z(),
+         odom_v_.x(), odom_v_.y(), odom_v_.z();
+
+    // 观测器使用的输入 u：实际发送出去的角速度/推力
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(ACADO_NU);
+    if (ACADO_NU > 0) u(0) = cmd_rate.x();
+    if (ACADO_NU > 1) u(1) = cmd_rate.y();
+    if (ACADO_NU > 2) u(2) = cmd_rate.z();
+    if (ACADO_NU > 3) u(3) = cmd_thrust;
+
+    // 解锁后第一次进入有效飞行状态时，用当前测量值初始化观测器内部状态
+    if (!disturbance_inited_) {
+        disturbance_observer_.setFirstZ(y);
+        disturbance_inited_ = true;
+    }
+    disturbance_observer_.kalman_geso_update(y, u, uav_mass_, 9.8066); // DOB计算
+
+    kf_state_latest_ = disturbance_observer_.getKfState();
+    has_kf_state_ = (kf_state_latest_.size() >= 10);
+
+    const Eigen::VectorXd d_hat_full = disturbance_observer_.getDisturbance();
+    if (d_hat_full.size() >= 3) {
+        d_hat << d_hat_full(0), d_hat_full(1), d_hat_full(2);
+    }
+    return d_hat;
+}
+
+void PlannerClass::PublishCompensatedControl(const Eigen::Vector3d& d_hat_live,
+                                             const ros::Time& stamp)
+{
+    // 先取慢环 NMPC 给出的名义控制量
+    Eigen::Vector3d w_cmd = last_rate_cmd_nominal_;
+    double T_cmd = last_thrust_cmd_nominal_;
+
+    geometry_msgs::Vector3Stamped d_hat_msg;
+    d_hat_msg.header.stamp = stamp;
+    d_hat_msg.header.frame_id = "world";
+    d_hat_msg.vector.x = d_hat_live.x();
+    d_hat_msg.vector.y = d_hat_live.y();
+    d_hat_msg.vector.z = d_hat_live.z();
+    disturbance_hat_pub_.publish(d_hat_msg);
+
+    // 计算油门归一化值，供飞控使用
+    double thrust_norm = T_cmd / (uav_mass_ * thr2acc_);
     thrust_norm = std::max(0.1, std::min(0.9, thrust_norm));
-    
-    ROS_INFO_THROTTLE(0.3, "[NMPC] w=[%.3f %.3f %.3f] T=%.2fN thr2acc=%.3f norm=%.3f",
-    w_cmd.x(), w_cmd.y(), w_cmd.z(), T_cmd, thr2acc_, thrust_norm);
-    BodyrateCtrlPub(w_cmd, thrust_norm, ros::Time::now()); //发送给飞控的控制命令，角速度和归一化油门
 
-    WriteNmpcDebug(ros::Time::now().toSec(), w_cmd, T_cmd, thrust_norm,
-                   sfc_eps_cmd, d_hat, success_flag);
+    ROS_INFO_THROTTLE(0.3,
+                      "[NMPC] w=[%.3f %.3f %.3f] T=%.2fN thr2acc=%.3f norm=%.3f",
+                      w_cmd.x(), w_cmd.y(), w_cmd.z(), T_cmd, thr2acc_, thrust_norm);
+    BodyrateCtrlPub(w_cmd, thrust_norm, stamp); // 发送给飞控的控制命令，角速度和归一化油门
 
-    timed_thrust_.push(std::pair<ros::Time, double>(ros::Time::now(), thrust_));
-    while (timed_thrust_.size() > 100) {
-        timed_thrust_.pop();
-    }
-    //log_times_[4] = (ros::WallTime::now() - df_start).toSec() * 1000.0;
+    // 记录本次真正发出去的控制量，供下一拍 DOB 使用
+    last_rate_cmd_sent_ = w_cmd;
+    last_thrust_cmd_sent_ = T_cmd;
 
-    // log_times_[0] = (ros::WallTime::now() - t_start).toSec() * 1000.0;
-    WriteLogTime();
-    timer_mutex_.unlock();
+    WriteNmpcDebug(stamp.toSec(), w_cmd, T_cmd, thrust_norm,
+                   last_sfc_eps_cmd_, d_hat_live, last_nmpc_success_);
 }
 
 void PlannerClass::WriteSfcPlaneCount(const std::string& tag,
@@ -497,8 +614,14 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
         goal_in_sfc = path_size;
         Eigen::Matrix<double, Eigen::Dynamic, 4> planes;
         GenerateAPolytope(odom_p_, odom_p_, planes, 0);
+        int flipped = 0;
+        Eigen::Matrix<double, Eigen::Dynamic, 4> planes_oriented =
+            OrientPlanesToContainPoint(planes, odom_p_, &flipped);
+        if (flipped > 0) {
+            ROS_WARN_THROTTLE(0.5, "[SFC] near-end flipped %d plane(s) by interior-point check.", flipped);
+        }
         Eigen::Matrix<double, Eigen::Dynamic, 4> planes_used =
-            FilterAndSortPlanes(planes, odom_p_);
+            FilterAndSortPlanes(planes_oriented, odom_p_);
         WriteSfcPlaneCount("near_end", planes_used, sfc_steps, path_size, &ref_eval);
         if (planes_used.rows() == 0) {
             ROS_WARN_THROTTLE(0.5, "[SFC] near-end planes all violated, skip constraints this cycle.");
@@ -513,8 +636,14 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
     // find the biggest and the longest sfc
     Eigen::Matrix<double, Eigen::Dynamic, 4> planes, last_planes;
     GenerateAPolytope(follow_path_[astar_index_], follow_path_[astar_index_], planes, 0);
+    int flipped_init = 0;
+    Eigen::Matrix<double, Eigen::Dynamic, 4> planes_oriented =
+        OrientPlanesToContainPoint(planes, follow_path_[astar_index_], &flipped_init);
+    if (flipped_init > 0) {
+        ROS_WARN_THROTTLE(0.5, "[SFC] initial flipped %d plane(s) by interior-point check.", flipped_init);
+    }
     Eigen::Matrix<double, Eigen::Dynamic, 4> planes_used =
-        FilterAndSortPlanes(planes, odom_p_);
+        FilterAndSortPlanes(planes_oriented, odom_p_);
     WriteSfcPlaneCount("initial", planes_used, sfc_steps, path_size, &ref_eval);
     if (planes_used.rows() == 0) {
         ROS_WARN_THROTTLE(0.5, "[SFC] initial planes all violated, skip constraints this cycle.");
@@ -522,13 +651,13 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
     }
     last_planes = planes_used;
     int init_num = 0;
-    if (mpc_->IsInFSC(odom_p_, planes) == false) { // if odom is not in initial sfc
+    if (mpc_->IsInFSC(odom_p_, planes_oriented) == false) { // if odom is not in initial sfc
         init_num = (odom_p_ - follow_path_[astar_index_]).norm() / path_dis_ / ref_dis_;
         ROS_INFO("\033[35m UAV is out sfc! init num is %d \033[0m", init_num);
     }
     int first_id = astar_index_, mpc_goal_index = 0;
     for (int i = first_id + 1; i < path_size; i++) { // find last pos in first sfc
-        if (mpc_->IsInFSC(follow_path_[i], planes)) {
+        if (mpc_->IsInFSC(follow_path_[i], planes_oriented)) {
             first_id = i;
             goal_in_sfc = i;
         } else {
@@ -552,8 +681,14 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
         if (i <= first_id) break;
         Eigen::Matrix<double, Eigen::Dynamic, 4> long_planes;
         GenerateAPolytope(follow_path_[first_id], follow_path_[i], long_planes, 1);
+        int flipped_long = 0;
+        Eigen::Matrix<double, Eigen::Dynamic, 4> long_oriented =
+            OrientPlanesToContainPoint(long_planes, follow_path_[first_id], &flipped_long);
+        if (flipped_long > 0) {
+            ROS_WARN_THROTTLE(0.5, "[SFC] long flipped %d plane(s) by interior-point check.", flipped_long);
+        }
         Eigen::Matrix<double, Eigen::Dynamic, 4> long_used =
-            FilterAndSortPlanes(long_planes, odom_p_);
+            FilterAndSortPlanes(long_oriented, odom_p_);
         WriteSfcPlaneCount("long", long_used, sfc_steps, path_size, &ref_eval);
         if (long_used.rows() > 0) {
             for (int j = mpc_goal_index + 1; j < sfc_steps; j++) {
@@ -819,20 +954,40 @@ void PlannerClass::LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
         local_pc_.push_back(Eigen::Vector3d(point.x, point.y, point.z));
     }
 
-    // update astar map
+    // update astar map + replan trigger (IPC-style): only trigger after consecutive detections
+    // that the remaining path is blocked by newly observed obstacles.
     static int obs_count = 0;
     local_astar_->SetCenter(Eigen::Vector3d(odom_p_.x(), odom_p_.y(), 0.0));
     local_astar_->setObsVector(local_pc_, expand_fix_);
-    std::vector<Eigen::Vector3d> remain_path;
-    remain_path.insert(remain_path.begin(), follow_path_.begin()+astar_index_, follow_path_.end());
-    if (local_astar_->CheckPathFree(remain_path) == false) replan_flag_ = true;
-    // bool flag = local_astar_->CheckPathFree(follow_path_);     // check path is free or not
-    // if (flag == false) obs_count++;
-    // else obs_count = 0;
-    // if (obs_count >= 2) {
-    //     obs_count = 0;
-    //     replan_flag_ = true;
-    // }
+
+    bool path_blocked = false;
+    if (!follow_path_.empty()) {
+        int start_idx = astar_index_;
+        if (start_idx < 0) start_idx = 0;
+        if (start_idx >= static_cast<int>(follow_path_.size())) {
+            start_idx = static_cast<int>(follow_path_.size()) - 1;
+            ROS_WARN_THROTTLE(0.5,
+                              "[IPC2] astar_index(%d) out of range for follow_path size(%zu), clamped.",
+                              astar_index_, follow_path_.size());
+        }
+        std::vector<Eigen::Vector3d> remain_path;
+        remain_path.insert(remain_path.end(),
+                           follow_path_.begin() + start_idx,
+                           follow_path_.end());
+        if (!remain_path.empty() && !local_astar_->CheckPathFree(remain_path)) {
+            path_blocked = true;
+        }
+    }
+
+    if (path_blocked) {
+        ++obs_count;
+    } else {
+        obs_count = 0;
+    }
+    if (obs_count >= 2) {
+        obs_count = 0;
+        replan_flag_ = true;
+    }
     
     // local_astar_->GetOccupyPcl(cloud);
     // cloud.width = cloud.points.size();

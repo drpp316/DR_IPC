@@ -1,4 +1,6 @@
 <launch>
+    <arg name="start_rqt_plot" default="true"/>
+
     <node pkg="ipc2" type="ipc2_node" name="ipc2_node" output="screen">
         <!-- publish topic -->
         <remap from="cmd"          to="/planning/pos_cmd"/>
@@ -16,11 +18,17 @@
         <remap from="goal"         to="/goal"/>
         <remap from="rc_in"        to="/mavros/rc/in"/>
 
-        <rosparam command="load" file="$(find ipc2)/config/param.yaml"/>
+        <rosparam command="load" file="$(find ipc2)/config/param_marsim.yaml"/>
 
     </node>
 
     <node name="ipc2" pkg="rviz" type="rviz" args="-d $(find ipc2)/config/env.rviz"/>
+    <node if="$(arg start_rqt_plot)"
+          name="ipc2_rqt_plot"
+          pkg="rqt_plot"
+          type="rqt_plot"
+          output="screen"
+          args="/disturbance_hat/vector/x /disturbance_hat/vector/y /disturbance_hat/vector/z"/>
     
     <!-- <include file="$(find test_interface)/launch/so3_quadrotor_sim.xml"></include> -->
 </launch>

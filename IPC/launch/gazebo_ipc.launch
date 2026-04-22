@@ -1,4 +1,5 @@
 <launch>
+    <arg name="start_rqt_plot" default="true"/>
 
  
     <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_camera_init"
@@ -27,5 +28,17 @@
     </node>
     
     <node name="ipc2" pkg="rviz" type="rviz" args="-d $(find ipc2)/config/env_real.rviz"/>
+    <node if="$(arg start_rqt_plot)"
+          name="ipc2_rqt_plot"
+          pkg="rqt_plot"
+          type="rqt_plot"
+          output="screen"
+          args="/disturbance_hat/vector/x /disturbance_hat/vector/y /disturbance_hat/vector/z"/>
+    <node if="$(arg start_rqt_plot)"
+          name="ipc2_rqt_plot_attitude_height"
+          pkg="rqt_plot"
+          type="rqt_plot"
+          output="screen"
+          args="/Odometry/pose/pose/position/z /Odometry/pose/pose/orientation/x /Odometry/pose/pose/orientation/y"/>
 
 </launch>
