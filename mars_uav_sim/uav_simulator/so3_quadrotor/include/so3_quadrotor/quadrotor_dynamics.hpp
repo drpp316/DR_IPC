@@ -28,6 +28,12 @@ struct Cmd {
   bool  use_external_yaw = false;
 };
 
+struct BodyrateCmd {
+  Eigen::Vector3d rate = Eigen::Vector3d::Zero();
+  double thrust = 0.0; // total thrust in Newton
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+};
+
 class Quadrotor {
  private:
   // parameters
@@ -69,6 +75,10 @@ class Quadrotor {
     }
   } state_;
   Eigen::Vector4d  input_ = Eigen::Vector4d::Zero();
+  Eigen::Vector3d  bodyrate_kOm_ = Eigen::Vector3d(0.02, 0.02, 0.01);
+  Eigen::Vector3d  bodyrate_kI_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d  bodyrate_int_err_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d  bodyrate_int_limit_ = Eigen::Vector3d(0.2, 0.2, 0.1);
  public:
   const Config &config;
   const State &state;
@@ -190,8 +200,13 @@ class Quadrotor {
                                 Rd12 * R12 + Rd22 * R22 + Rd32 * R32 +
                                 Rd13 * R13 + Rd23 * R23 + Rd33 * R33));
     float force = 0;
-    if (Psi < 1.0f) // Position control stability guaranteed only when Psi < 1
+    if (Psi < 1.0f) { // Position control stability guaranteed only when Psi < 1
       force = cmd.force[0] * R13 + cmd.force[1] * R23 + cmd.force[2] * R33;
+    } else {
+      // When attitude error is too large, use minimum thrust to prevent crash
+      // Apply gravity compensation to maintain altitude
+      force = config_.mass * config_.g;
+    }
 
     float eR1 = 0.5f * (R12 * Rd13 - R13 * Rd12 + R22 * Rd23 - R23 * Rd22 +
                         R32 * Rd33 - R33 * Rd32);
@@ -228,6 +243,40 @@ class Quadrotor {
     return control;
   }
 
+  inline Control getControlFromBodyrate(const BodyrateCmd& cmd, double dt) {
+    const double kf = config_.kf;
+    const double km = config_.km;
+    const double d = config_.arm_length;
+
+    const Eigen::Vector3d eOm = state_.omega - cmd.rate;
+    if (dt > 0.0) {
+      bodyrate_int_err_ += eOm * dt;
+      for (int i = 0; i < 3; ++i) {
+        bodyrate_int_err_(i) = std::max(-bodyrate_int_limit_(i),
+                                        std::min(bodyrate_int_limit_(i), bodyrate_int_err_(i)));
+      }
+    }
+    const Eigen::Vector3d moments =
+        -bodyrate_kOm_.cwiseProduct(eOm)
+        -bodyrate_kI_.cwiseProduct(bodyrate_int_err_)
+        + state_.omega.cross(config_.J * state_.omega);
+
+    const double force = std::max(0.0, cmd.thrust);
+
+    double w_sq[4];
+    w_sq[0] = force / (4.0 * kf) - moments(1) / (2.0 * d * kf) + moments(2) / (4.0 * km);
+    w_sq[1] = force / (4.0 * kf) + moments(1) / (2.0 * d * kf) + moments(2) / (4.0 * km);
+    w_sq[2] = force / (4.0 * kf) + moments(0) / (2.0 * d * kf) - moments(2) / (4.0 * km);
+    w_sq[3] = force / (4.0 * kf) - moments(0) / (2.0 * d * kf) - moments(2) / (4.0 * km);
+
+    Control control;
+    for (int i = 0; i < 4; ++i) {
+      if (w_sq[i] < 0.0) w_sq[i] = 0.0;
+      control.rpm[i] = std::sqrt(w_sq[i]);
+    }
+    return control;
+  }
+
   // set initial state
   inline void setPos(const Eigen::Vector3d &pos) {
     state_.x = pos;
@@ -237,6 +286,18 @@ class Quadrotor {
   }
   inline void setRpm(const Eigen::Vector4d &rpm) {
     state_.motor_rpm = rpm;
+  }
+  inline void setBodyrateGains(const Eigen::Vector3d &kOm) {
+    bodyrate_kOm_ = kOm.cwiseMax(Eigen::Vector3d::Constant(1e-3));
+  }
+  inline void setBodyrateIGains(const Eigen::Vector3d &kI) {
+    bodyrate_kI_ = kI.cwiseMax(Eigen::Vector3d::Zero());
+  }
+  inline void setBodyrateILimit(const Eigen::Vector3d &limit) {
+    bodyrate_int_limit_ = limit.cwiseMax(Eigen::Vector3d::Constant(1e-4));
+  }
+  inline void resetBodyrateIntegrator() {
+    bodyrate_int_err_.setZero();
   }
   // get values of state
   inline double getGrav() const {

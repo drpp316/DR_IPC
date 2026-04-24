@@ -1,4 +1,8 @@
 #include "so3_quadrotor/quadrotor_dynamics.hpp"
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <mavros_msgs/AttitudeTarget.h>
 #include <quadrotor_msgs/SO3Command.h>
 #include <nodelet/nodelet.h>
 #include <ros/ros.h>
@@ -13,14 +17,19 @@ namespace so3_quadrotor {
         std::shared_ptr<Quadrotor> quadrotorPtr_;
         Control control_;
         Cmd cmd_;
+        BodyrateCmd bodyrate_cmd_;
         ros::Publisher odom_pub_, imu_pub_, vis_pub_;
-        ros::Subscriber cmd_sub_;
+        ros::Subscriber cmd_sub_, bodyrate_cmd_sub_;
         ros::Timer simulation_timer;
         tf::TransformBroadcaster tf_br_;
+        std::ofstream marsim_csv_;
 
         // parameters
         int simulation_rate_ = 1e3;
         int odom_rate_ = 400;
+        bool use_bodyrate_cmd_ = false;
+        double hover_percentage_ = 0.7;
+        double last_norm_thrust_ = 0.0;
         // msgs
         nav_msgs::Odometry odom_msg_;
         sensor_msgs::Imu imu_msg_;
@@ -49,9 +58,26 @@ namespace so3_quadrotor {
             cmd_.use_external_yaw = cmd_msg->aux.use_external_yaw;
         }
 
+        void bodyrate_cmd_callback(const mavros_msgs::AttitudeTarget::ConstPtr &msg) {
+            bodyrate_cmd_.rate.x() = msg->body_rate.x;
+            bodyrate_cmd_.rate.y() = msg->body_rate.y;
+            bodyrate_cmd_.rate.z() = msg->body_rate.z;
+            last_norm_thrust_ = std::max(0.0, static_cast<double>(msg->thrust));
+
+            const double hover_percentage = std::max(0.05, hover_percentage_);
+            bodyrate_cmd_.thrust =
+                last_norm_thrust_ *
+                quadrotorPtr_->config.mass * quadrotorPtr_->config.g / hover_percentage;
+        }
+
         void timer_callback(const ros::TimerEvent &event) {
             auto last_control = control_;
-            control_ = quadrotorPtr_->getControl(cmd_);
+            if (use_bodyrate_cmd_) {
+                control_ = quadrotorPtr_->getControlFromBodyrate(
+                    bodyrate_cmd_, 1.0 / static_cast<double>(simulation_rate_));
+            } else {
+                control_ = quadrotorPtr_->getControl(cmd_);
+            }
             for (size_t i = 0; i < 4; ++i) {
                 if (std::isnan(control_.rpm[i]))
                     control_.rpm[i] = last_control.rpm[i];
@@ -90,6 +116,21 @@ namespace so3_quadrotor {
                 odom_msg_.twist.twist.angular.y = omega(1);
                 odom_msg_.twist.twist.angular.z = omega(2);
                 odom_pub_.publish(odom_msg_);
+                if (marsim_csv_.is_open()) {
+                    marsim_csv_ << std::fixed << std::setprecision(6)
+                                << tnow.toSec() << ","
+                                << pos(0) << "," << pos(1) << "," << pos(2) << ","
+                                << vel(0) << "," << vel(1) << "," << vel(2) << ","
+                                << omega(0) << "," << omega(1) << "," << omega(2) << ","
+                                << last_norm_thrust_ << ","
+                                << bodyrate_cmd_.thrust << ","
+                                << quadrotorPtr_->config.mass * quadrotorPtr_->config.g << ","
+                                << hover_percentage_ << ","
+                                << bodyrate_cmd_.rate.x() << ","
+                                << bodyrate_cmd_.rate.y() << ","
+                                << bodyrate_cmd_.rate.z()
+                                << std::endl;
+                }
                 // imu
                 imu_msg_.header.stamp = tnow;
                 imu_msg_.orientation.x = quat.x();
@@ -172,8 +213,26 @@ namespace so3_quadrotor {
             nh.getParam("min_rpm", config.min_rpm);
             nh.getParam("simulation_rate", simulation_rate_);
             nh.getParam("odom_rate", odom_rate_);
+            nh.param("use_bodyrate_cmd", use_bodyrate_cmd_, false);
+            nh.param("hover_percentage", hover_percentage_, 0.7);
+            Eigen::Vector3d bodyrate_kOm(0.02, 0.02, 0.01);
+            Eigen::Vector3d bodyrate_kI(0.0, 0.0, 0.0);
+            Eigen::Vector3d bodyrate_i_limit(0.2, 0.2, 0.1);
+            nh.param("bodyrate_kOm/x", bodyrate_kOm.x(), bodyrate_kOm.x());
+            nh.param("bodyrate_kOm/y", bodyrate_kOm.y(), bodyrate_kOm.y());
+            nh.param("bodyrate_kOm/z", bodyrate_kOm.z(), bodyrate_kOm.z());
+            nh.param("bodyrate_kI/x", bodyrate_kI.x(), bodyrate_kI.x());
+            nh.param("bodyrate_kI/y", bodyrate_kI.y(), bodyrate_kI.y());
+            nh.param("bodyrate_kI/z", bodyrate_kI.z(), bodyrate_kI.z());
+            nh.param("bodyrate_i_limit/x", bodyrate_i_limit.x(), bodyrate_i_limit.x());
+            nh.param("bodyrate_i_limit/y", bodyrate_i_limit.y(), bodyrate_i_limit.y());
+            nh.param("bodyrate_i_limit/z", bodyrate_i_limit.z(), bodyrate_i_limit.z());
 
             quadrotorPtr_ = std::make_shared<Quadrotor>(config);
+            quadrotorPtr_->setBodyrateGains(bodyrate_kOm);
+            quadrotorPtr_->setBodyrateIGains(bodyrate_kI);
+            quadrotorPtr_->setBodyrateILimit(bodyrate_i_limit);
+            quadrotorPtr_->resetBodyrateIntegrator();
             quadrotorPtr_->setPos(Eigen::Vector3d(init_x, init_y, init_z));
             quadrotorPtr_->setYpr(Eigen::Vector3d(init_yaw, 0, 0));
             double rpm = sqrt(config.mass * config.g / 4 / config.kf);
@@ -185,12 +244,31 @@ namespace so3_quadrotor {
             cmd_.qx = quat.x();
             cmd_.qy = quat.y();
             cmd_.qz = quat.z();
+            last_norm_thrust_ = hover_percentage_;
+
+            const char* home = std::getenv("HOME");
+            const std::string csv_path =
+                std::string(home ? home : "/tmp") +
+                "/ipc2/src/IPC/IPC/config/marsim_exec_debug.csv";
+            marsim_csv_.open(csv_path, std::ios::out | std::ios::trunc);
+            if (marsim_csv_.is_open()) {
+                marsim_csv_ << "t,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,"
+                            << "omega_x,omega_y,omega_z,"
+                            << "thrust_norm,thrust_newton,mg,hover_percentage,"
+                            << "rate_x,rate_y,rate_z"
+                            << std::endl;
+            } else {
+                ROS_WARN("Failed to open MARS exec csv: %s", csv_path.c_str());
+            }
 
             odom_pub_ = nh.advertise<nav_msgs::Odometry>("odom", 100);
             imu_pub_ = nh.advertise<sensor_msgs::Imu>("imu", 10);
             vis_pub_ = nh.advertise<visualization_msgs::MarkerArray>("vis", 10);
             cmd_sub_ = nh.subscribe<quadrotor_msgs::SO3Command>("so3cmd", 10, &Nodelet::cmd_callback, this,
                                                                 ros::TransportHints().tcpNoDelay());
+            bodyrate_cmd_sub_ = nh.subscribe<mavros_msgs::AttitudeTarget>(
+                "bodyrate_cmd", 10, &Nodelet::bodyrate_cmd_callback, this,
+                ros::TransportHints().tcpNoDelay());
             simulation_timer = nh.createTimer(ros::Duration(1.0 / simulation_rate_), &Nodelet::timer_callback, this);
 
             odom_msg_.header.frame_id = "world";

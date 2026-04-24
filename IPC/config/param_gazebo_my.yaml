@@ -2,28 +2,26 @@
 simulation: true
 perfect_simu: false
 frequency: 100.0
-fast_frequency: 100.0
 ctrl_delay: 0.01
-sfc_dis: 0.3
+sfc_dis: 0.32 #SFC走廊和障碍物之间的安全余量
 
 thrust_limit: 0.98
 hover_esti: true
 hover_perc: 0.758
-uav_mass: 1.735
 
 yaw_ctrl_flag: true
-yaw_gain: 0.6
 yaw_freeze_goal_dist: 0.3
 
 goal_x: 0.0
 goal_y: 0.0
 goal_z: 1.5 #起飞高度
-pred_vis_steps: 10 # RViz显示预测前k步
+
+pred_vis_steps: 15 # RViz显示预测前k步
 
 dob:
-  eso_bandwidth: 4.0 # 干扰观测器极点(带宽)2.0
+  eso_bandwidth: 2.0 # 干扰观测器极点(带宽)2.0
   kf_process_noise_scale: 3.0 # Q缩放(大一点=滤波更少, 更跟测量)
-  kf_measurement_noise_scale: 0.1 # R缩放(小一点=更信任测量)
+  kf_measurement_noise_scale: 1.0 # R缩放(小一点=更信任测量)
 
   interconnected_mode: false # KF<->DOB互联：KF滤波DOB状态，DOB反哺KF干扰
   use_kf_state_for_nmpc: false # NMPC状态源开关：false=里程计测量状态，true=使用KF滤波后的[p,v]
@@ -36,42 +34,42 @@ astar:
   map_x_size: 10.0 #局部地图尺寸，单位米
   map_y_size: 10.0 #局部地图尺寸，单位米
   map_z_size: 3.0 #天花板高度
-  expand_dyn: 0.55 #   用于**A\*路径规划时**的障碍物膨胀。规划时膨胀更大，让路径离障碍物更远，留出余量。
-  expand_fix: 0.4 #   用于**实时检测当前路径是否碰到障碍物**，触发重规划。固定值，代表无人机物理安全距离。
+  expand_dyn: 0.5 #   用于**A\*路径规划时**的障碍物膨胀。规划时膨胀更大，让路径离障碍物更远，留出余量。
+  expand_fix: 0.3 #   用于**实时检测当前路径是否碰到障碍物**，触发重规划。固定值，代表无人机物理安全距离。
 
 fsm:
-  ref_dis: 3 # 每个MPC步长跳过2个路径点
+  ref_dis: 2 # 每个MPC步长跳过2个路径点
   path_dis: 0.05 # 路径点间距0.05m
   ref_v_max: 1.0 # 参考速度上限(m/s)，限制送入NMPC的v_ref
 
 mpc:
-  horizon: 20 # 运行时有效预测步长(与ACADO_N保持一致, 总预测时域1s)
+  horizon: 20 #预测步长(与ACADO_N保持一致, 总预测时域1s)
   step: 0.05 #与acado一致
+  model_mass: 1.735 #质量
 
   #权重
-  R_p: 30.0
+  R_p: 40.0
   R_v: 4
 
   R_yaw: 10.0 #偏航角增益
   R_phi: 5.0 #其余的姿态角增益
 
-  R_pN: 5.0
+  R_pN: 10.0
   R_vN: 1.0
   R_yawN: 8.0
   R_phiN: 1.0
 
-  R_w: 3
-  R_T: 0.5
-  R_sfc_eps: 5 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
+  R_w: 8
+  R_T: 1
+  R_sfc_eps: 1 # SFC软约束松弛量权重(先取中等，避免一上来又变成近似硬约束)
 
   #约束
-  sfc_eps_max: 10.0 # 单步最大可允许SFC违反量；法向量近似归一化时可理解为15cm
-  wx_max: 0.70
-  wy_max: 0.70
+  wx_max: 0.8
+  wy_max: 0.8
   wz_max: 3.0
-  T_min: 1.0
+  T_min: 0.0
   T_max: 40.0
 
-  sfc_active_planes: 15 # 先保留15个最有效约束面
-  sfc_apply_steps: 15 # 先只对最近k个预测步启用SFC，优先保证可行性
+  sfc_active_planes: 6 # 先保留15个最有效约束面
+  sfc_apply_steps: 2 # 先只对最近k个预测步启用SFC，优先保证可行性
   log_sfc_constraints: false #记录SFC约束相关数据，供后续分析

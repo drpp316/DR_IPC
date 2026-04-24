@@ -16,6 +16,7 @@
 ros::Publisher goal_pub, local_pc_pub, map_pub, obs_pub;
 Eigen::Vector3d odom_p, odom_v, odom_p_last;
 Eigen::Vector3d obs_pos, obs_pos_r, obs_size;
+Eigen::Vector3d goal_pos;
 double obs_dis = 1.0, min_dis = 10000.0, obs_v, resolusion, odom_p_dt, v_f;
 bool obs_flag = false, first_flag = false;
 pcl::PointCloud<pcl::PointXYZ> cloud, map_cloud;
@@ -67,9 +68,9 @@ void GoalPathPublish(void)
     geometry_msgs::PoseStamped msg;
     msg.header.frame_id = "world";
     msg.header.stamp = ros::Time::now();
-    msg.pose.position.x = 10.0;
-    msg.pose.position.y = 0.0;
-    msg.pose.position.z = 1.0;
+    msg.pose.position.x = goal_pos.x();
+    msg.pose.position.y = goal_pos.y();
+    msg.pose.position.z = goal_pos.z();
     goal_pub.publish(msg);
 }
 
@@ -130,17 +131,22 @@ int main(int argc, char **argv)
     nh.param("/fast_avoid/obs_l", obs_size.x(), 0.0);
     nh.param("/fast_avoid/obs_w", obs_size.y(), 0.0);
     nh.param("/fast_avoid/obs_h", obs_size.z(), 0.0);
+    nh.param("/fast_avoid/goal_x", goal_pos.x(), 15.0);
+    nh.param("/fast_avoid/goal_y", goal_pos.y(), 0.0);
+    nh.param("/fast_avoid/goal_z", goal_pos.z(), 1.0);
 
     obs_pos << obs_pos_r.x(), obs_pos_r.y() + 1.5, obs_pos_r.z();
     std::cout << "obs_dis:   " << obs_dis << std::endl;
     std::cout << "obs_pos:   " << obs_pos.transpose() << std::endl;
     std::cout << "obs_pos_r: " << obs_pos_r.transpose() << std::endl;
     std::cout << "obs_size:  " << obs_size.transpose() << std::endl;
+    std::cout << "goal_pos:  " << goal_pos.transpose() << std::endl;
 
     ros::Subscriber odom_sub = nh.subscribe<nav_msgs::Odometry>("odom", 1, &OdomCallback, ros::TransportHints().tcpNoDelay());
     ros::Subscriber pvaj_sub = nh.subscribe<quadrotor_msgs::PositionCommand>("pvaj", 1, &PVAJCallbacl, ros::TransportHints().tcpNoDelay());
     
-    goal_pub = nh.advertise<geometry_msgs::PoseStamped>("goal", 1);
+    // Latch the goal so ipc2_node can still receive it if fast_avoid starts first.
+    goal_pub = nh.advertise<geometry_msgs::PoseStamped>("goal", 1, true);
     // goal_pub = nh.advertise<nav_msgs::Path>("goal", 1);
     local_pc_pub = nh.advertise<sensor_msgs::PointCloud2>("local_pc", 1);
     map_pub = nh.advertise<sensor_msgs::PointCloud2>("map", 1);
@@ -206,7 +212,7 @@ int main(int argc, char **argv)
         double dis = std::fabs(odom_p.x() - (obs_pos_r.x()-obs_size.x()/2));
         if (count > 100) { // 10Hz
             count = 0;
-            // GoalPathPublish();
+            GoalPathPublish();
             static bool new_flag = false;
             if (dis <= obs_dis && new_flag == false) {
                 new_flag = true;

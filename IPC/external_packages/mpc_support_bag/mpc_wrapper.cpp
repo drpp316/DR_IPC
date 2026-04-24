@@ -13,6 +13,11 @@ MpcWrapper::MpcWrapper()
     
 }
 
+void MpcWrapper::setSoftConstraintWeight(real_t weight)
+{
+    soft_constraint_weight_ = std::max<real_t>(0.0, weight);
+}
+
 void MpcWrapper::initMpc(
     const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NX, 1>> &current_states,
     const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NX, ACADO_N + 1>> &predicted_states,
@@ -32,12 +37,18 @@ void MpcWrapper::initMpc(
     // acado所有variables初始化
     acado_current_states_ = current_states;
     acado_predicted_states_ = predicted_states;
+    last_predicted_states_solution_ = predicted_states;
     // 控制u初始化
     acado_controls_.setZero();
+    last_controls_solution_.setZero();
     acado_reference_.block(0, 0, kCostStateSize, ACADO_N) = 
         reference_states.block(0, 0, kCostStateSize, ACADO_N);
     // u的reference初始化
     acado_reference_.block(kCostStateSize, 0, ACADO_NU, ACADO_N) = reference_inputs;
+    if (kSoftConstraintResidualSize > 0) {
+        acado_reference_.block(kCostStateSize + ACADO_NU, 0,
+                               kSoftConstraintResidualSize, ACADO_N).setZero();
+    }
     acado_terminal_reference_ = reference_states.rightCols(1);
     // 权重矩阵W和WN
     setMpcWeight(Q, R);
@@ -77,6 +88,10 @@ bool MpcWrapper::setMpcReference(
     }
     acado_reference_.block(0, 0, kCostStateSize, ACADO_N) = ref_states.leftCols(ACADO_N);
     acado_reference_.block(kCostStateSize, 0, ACADO_NU, ACADO_N) = ref_control;
+    if (kSoftConstraintResidualSize > 0) {
+        acado_reference_.block(kCostStateSize + ACADO_NU, 0,
+                               kSoftConstraintResidualSize, ACADO_N).setZero();
+    }
     acado_terminal_reference_ = ref_states.rightCols(1);
     
     acado_initializeNodesByForwardSimulation();
@@ -105,9 +120,17 @@ bool MpcWrapper::setMpcWeight(
 
     Eigen::Matrix<real_t, ACADO_NY, ACADO_NY> W_;
     Eigen::Matrix<real_t, ACADO_NYN, ACADO_NYN> WN_;
+    W_.setZero();
+    WN_.setZero();
 
     W_.block(0, 0, kCostStateSize, kCostStateSize) = Q;
     W_.block(kCostStateSize, kCostStateSize, ACADO_NU, ACADO_NU) = R;
+    if (kSoftConstraintResidualSize > 0) {
+        W_.block(kCostStateSize + ACADO_NU, kCostStateSize + ACADO_NU,
+                 kSoftConstraintResidualSize, kSoftConstraintResidualSize).setIdentity();
+        W_.block(kCostStateSize + ACADO_NU, kCostStateSize + ACADO_NU,
+                 kSoftConstraintResidualSize, kSoftConstraintResidualSize) *= soft_constraint_weight_;
+    }
     WN_ = W_.block(0, 0, kCostStateSize, kCostStateSize);
 
     real_t state_scale{1.0};
@@ -122,6 +145,16 @@ bool MpcWrapper::setMpcWeight(
         W_.block(0, 0, kCostStateSize, kCostStateSize) * state_scale;
         acado_weight_.block(kCostStateSize, i*ACADO_NY+kCostStateSize, ACADO_NU, ACADO_NU) =
         W_.block(kCostStateSize, kCostStateSize, ACADO_NU, ACADO_NU) * input_scale;
+        if (kSoftConstraintResidualSize > 0) {
+            acado_weight_.block(kCostStateSize + ACADO_NU,
+                                i * ACADO_NY + kCostStateSize + ACADO_NU,
+                                kSoftConstraintResidualSize,
+                                kSoftConstraintResidualSize) =
+                W_.block(kCostStateSize + ACADO_NU,
+                         kCostStateSize + ACADO_NU,
+                         kSoftConstraintResidualSize,
+                         kSoftConstraintResidualSize);
+        }
     } 
     acado_terminal_weight_ = WN_ * state_scale;
 
@@ -156,6 +189,16 @@ bool MpcWrapper::setMpcWeight(int index,
     {
         acado_weight_.block(0, index*ACADO_NY, kCostStateSize, kCostStateSize) = Q;
         acado_weight_.block(kCostStateSize, index*ACADO_NY+kCostStateSize, ACADO_NU, ACADO_NU) = R;
+        if (kSoftConstraintResidualSize > 0) {
+            acado_weight_.block(kCostStateSize + ACADO_NU,
+                                index * ACADO_NY + kCostStateSize + ACADO_NU,
+                                kSoftConstraintResidualSize,
+                                kSoftConstraintResidualSize).setIdentity();
+            acado_weight_.block(kCostStateSize + ACADO_NU,
+                                index * ACADO_NY + kCostStateSize + ACADO_NU,
+                                kSoftConstraintResidualSize,
+                                kSoftConstraintResidualSize) *= soft_constraint_weight_;
+        }
     }
 
     return true;
@@ -193,6 +236,24 @@ bool MpcWrapper::solveMpc(
         printf("MpcWrapper::solveMpc: acado feedback failed! status=%d\n", feedback_status);
         return false;
     }
+
+    if (!acado_predicted_states_.allFinite()) {
+        printf("MpcWrapper::solveMpc: non-finite predicted states detected after feedback!\n");
+        return false;
+    }
+    if (!acado_controls_.allFinite()) {
+        printf("MpcWrapper::solveMpc: non-finite controls detected after feedback!\n");
+        return false;
+    }
+
+    // Cache the solved trajectory/control before shifting the warm start for
+    // the next RTI step. This keeps visualization/debug output aligned with
+    // the actual current QP solution instead of the shifted initial guess.
+    last_predicted_states_solution_ = acado_predicted_states_;
+    last_controls_solution_ = acado_controls_;
+
+    acado_shiftStates(2, 0, 0);
+    acado_shiftControls(0);
     
     const int prep_status = acado_preparationStep();
     if (prep_status != 0) {
@@ -200,22 +261,22 @@ bool MpcWrapper::solveMpc(
         return false;
     }
 
-    if (!acado_controls_.allFinite()) {
-        printf("MpcWrapper::solveMpc: non-finite controls detected!\n");
-        return false;
-    }
-
     return true;
+}
+
+void MpcWrapper::getMpcStates(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NX, ACADO_N + 1>> states)
+{
+    states = last_predicted_states_solution_;
 }
 
 void MpcWrapper::getMpcControl(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, 1>> control, int index)
 {
-    control = acado_controls_.col(index);
+    control = last_controls_solution_.col(index);
 }
 
 void MpcWrapper::getMpcControls(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, ACADO_N>> controls)
 {
-    controls = acado_controls_;
+    controls = last_controls_solution_;
 }
 
 void MpcWrapper::getMpcBound(

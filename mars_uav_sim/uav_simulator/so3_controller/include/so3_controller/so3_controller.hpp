@@ -60,19 +60,14 @@ namespace so3_controller {
             }else{
                 e_v = Eigen::Vector3d::Zero();
             }
-            if(!isnan(des_acc(0)) && !isnan(des_acc(1)) && !isnan(des_acc(2))){
-                e_a = des_acc - acc_;
-            }else{
-                e_a = Eigen::Vector3d::Zero();
-            }
-            Eigen::Vector3d totalError = e_p+e_v+e_a;
-            Eigen::Vector3d ka(fabs(totalError[0]) > 3 ? 0 : (fabs(totalError[0]) * 0.2),
-                               fabs(totalError[1]) > 3 ? 0 : (fabs(totalError[1]) * 0.2),
-                               fabs(totalError[2]) > 3 ? 0 : (fabs(totalError[2]) * 0.2));
+            // The simulator IMU acceleration is body-frame and includes gravity.
+            // Feeding it back here as e_a = des_acc - acc_ mixes mismatched quantities and
+            // can slowly bias the controller downward. For IPC2->MARS validation we disable
+            // this acceleration-feedback term and keep the standard position/velocity + gravity path.
+            e_a = Eigen::Vector3d::Zero();
             force_.noalias() =
                     kx.asDiagonal() * (e_p) + kv.asDiagonal() * (e_v) +
-                    mass_ * /*(Eigen::Vector3d(1, 1, 1) - ka).asDiagonal() **/ (des_acc) +
-                    mass_ * ka.asDiagonal() * (e_a) +
+                    mass_ * des_acc +
                     mass_ * g_ * Eigen::Vector3d(0, 0, 1);
             // Limit control angle to 45 degree
             double theta = M_PI / 2;
@@ -80,8 +75,7 @@ namespace so3_controller {
             Eigen::Vector3d f;
             f.noalias() = kx.asDiagonal() * (e_p) +
                           kv.asDiagonal() * (e_v) +
-                          mass_ * des_acc +
-                          mass_ * ka.asDiagonal() * (e_a);
+                          mass_ * des_acc;
             if (Eigen::Vector3d(0, 0, 1).dot(force_ / force_.norm()) < c) {
                 double nf = f.norm();
                 double A = c * c * nf * nf - f(2) * f(2);

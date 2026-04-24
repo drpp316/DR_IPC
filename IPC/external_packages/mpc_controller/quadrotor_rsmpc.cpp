@@ -13,14 +13,14 @@ int main()
     // Variables 
     DifferentialState     p_x, p_y, p_z;
     DifferentialState     q_w, q_x, q_y, q_z;
-    DifferentialState     v_x, v_y, v_z, sfc_eps_aux;
-    Control               w_x, w_y, w_z, T, sfc_eps;
+    DifferentialState     v_x, v_y, v_z;
+    Control               w_x, w_y, w_z, T;
     OnlineData            d_x, d_y, d_z;
 
     //SFC
     // Polyhedral corridor constraints: c_x * p_x + c_y * p_y + c_z * p_z + c_d <= 0
     // Number must be fixed for ACADO code generation.
-    static constexpr int kSfcMaxPlanes = 20;
+    static constexpr int kSfcMaxPlanes = 10;
     OnlineData            c_x[kSfcMaxPlanes], c_y[kSfcMaxPlanes],
                           c_z[kSfcMaxPlanes], c_d[kSfcMaxPlanes];
     
@@ -33,14 +33,13 @@ int main()
     const double dt = 0.05;         // Discretization time [s]
     const int N = 20;               // Number of control intervals in horizon
     const double t_end = t_start + N * dt;  // Time horizon [s]
-    const double g_z = 9.8066;      // Gravity is everywhere [m/s^2]
+    const double g_z = 9.8066;        // Gravity is everywhere [m/s^2]
     const double w_max_yaw = 2.0;     // Maximal yaw rate [rad/s]
     const double w_max_xy = 1.5;      // Maximal pitch and roll rate [rad/s]
-    const double T_min = 0;         // Minimal thrust [N/kg]
-    const double m = 1.735; //1.5;1.745    // iris mass [kg]
-    const double T_max = 2.0*g_z*m;        // Maximal thrust [N/kg]
-    const double sfc_eps_max = 2.0;        // SFC soft-constraint slack upper bound
-    //const double T_max = 40.0;        // Maximal thrust [N/kg]
+    const double T_min = 0;           // Minimal thrust [N/kg]
+    const double m = 1.735;           // iris mass [kg]
+    const double T_max = 2.0*g_z*m;   // Maximal thrust [N/kg]
+    //const double T_max = 40.0;      // Maximal thrust [N/kg]
 
 
     // Model equations
@@ -52,13 +51,9 @@ int main()
     f << dot(q_x) ==  0.5 * ( w_x * q_w + w_z * q_y - w_y * q_z);
     f << dot(q_y) ==  0.5 * ( w_y * q_w - w_z * q_x + w_x * q_z);
     f << dot(q_z) ==  0.5 * ( w_z * q_w + w_y * q_x - w_x * q_y);
-    // Keep the soft-constraint slack out of the physical dynamics.
-    // A dummy integrator keeps sfc_eps as an optimization variable without
-    // perturbing the real quadrotor state prediction.
     f << dot(v_x) ==  2 * ( q_w * q_y + q_x * q_z ) * T/m + d_x;
     f << dot(v_y) ==  2 * ( q_y * q_z - q_w * q_x ) * T/m + d_y;
     f << dot(v_z) ==  ( 1 - 2 * q_x * q_x - 2 * q_y * q_y ) * T/m - g_z + d_z;
-    f << dot(sfc_eps_aux) == sfc_eps;
 
     // Reference functions and weighting matrices
     Function h, hN;
@@ -67,7 +62,23 @@ int main()
     h << p_x << p_y << p_z
     << q_w << q_x << q_y << q_z
     << v_x << v_y << v_z
-    << w_x << w_y << w_z << T << sfc_eps;
+    << w_x << w_y << w_z << T;
+
+    // SFC 软约束（LSQ 残差形式）：
+    // 把“超出平面的正向违反量”作为额外残差拼到 h 里，
+    // 这样仍然是 ACADO 支持的标准 LSQ 目标。
+    // 使用平滑 positive-part 近似：
+    //   pos(g) ~= 0.5 * (g + sqrt(g^2 + eps)) - 0.5 * sqrt(eps)
+    // 当 g <= 0 时近似为 0；当 g > 0 时近似为 g。
+    const double sfc_soft_eps = 1e-4;
+    const double sfc_soft_offset = 0.5 * std::sqrt(sfc_soft_eps);
+    for (int i = 0; i < kSfcMaxPlanes; ++i) {
+        const Expression plane_value =
+            c_x[i] * p_x + c_y[i] * p_y + c_z[i] * p_z + c_d[i];
+        const Expression plane_violation =
+            0.5 * (plane_value + sqrt(plane_value * plane_value + sfc_soft_eps)) - sfc_soft_offset;
+        h << plane_violation;
+    }
 
     // End cost vector consists of all states (no inputs at last state).
     hN << p_x << p_y << p_z
@@ -92,7 +103,9 @@ int main()
     Q(11,11) = 1;   // wy
     Q(12,12) = 1;   // wz
     Q(13,13) = 1;   // T
-    Q(14,14) = 3000; // sfc_eps (soft-constraint penalty)
+    for (int i = 14; i < h.getDim(); ++i) {
+        Q(i, i) = 1;  // Runtime weighting matrix W sets the actual soft-constraint strength.
+    }
 
     //  终端权重
     // End cost weight matrix
@@ -119,7 +132,6 @@ int main()
     r(3) = 0.7071;
     r(6) = 0.7071;
     r(10) = g_z;
-    r(14) = 0.0;
 
     DVector rN(hN.getDim());   // End cost reference
     rN.setZero();
@@ -157,16 +169,7 @@ int main()
     ocp.subjectTo(-w_max_xy <= w_y <= w_max_xy);
     ocp.subjectTo(-w_max_yaw <= w_z <= w_max_yaw);
     ocp.subjectTo( T_min <= T <= T_max);
-    ocp.subjectTo( 0.0 <= sfc_eps <= sfc_eps_max );
     //ocp.subjectTo( q_x * q_x + q_y * q_y <= q_sq_bound );
-
-    //sfc约束：p_x, p_y, p_z 需要满足 c_x * p_x + c_y * p_y + c_z * p_z + c_d <= 0
-    // Temporarily disable SFC path constraints to isolate whether the
-    // long-horizon prediction instability comes from NMPC itself or from
-    // the corridor constraints/slack handling.
-    // for (int i = 0; i < kSfcMaxPlanes; ++i) {
-    //     ocp.subjectTo(c_x[i] * p_x + c_y[i] * p_y + c_z[i] * p_z + c_d[i] - sfc_eps <= 0.0);
-    // }
 
     ocp.setNOD(3 + 4 * kSfcMaxPlanes);
 
@@ -186,9 +189,6 @@ int main()
         ocp.subjectTo( AT_START, w_x ==  0.0 );
         ocp.subjectTo( AT_START, w_y ==  0.0 );
         ocp.subjectTo( AT_START, w_z ==  0.0 );
-        ocp.subjectTo( AT_START, sfc_eps_aux ==  0.0 );
-
-
         // Setup some visualization
         GnuplotWindow window1( PLOT_AT_END );
         window1.addSubplot( p_x,"position x" );

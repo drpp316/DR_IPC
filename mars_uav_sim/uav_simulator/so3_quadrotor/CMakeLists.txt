@@ -7,6 +7,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
 
 find_package(Eigen3 REQUIRED)
 find_package(catkin REQUIRED COMPONENTS
+  mavros_msgs
   quadrotor_msgs
   roscpp
   nodelet
@@ -15,7 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   INCLUDE_DIRS include ${EIGEN3_INCLUDE_DIR}
-  CATKIN_DEPENDS quadrotor_msgs roscpp nodelet tf
+  CATKIN_DEPENDS mavros_msgs quadrotor_msgs roscpp nodelet tf
   DEPENDS EIGEN3
 )
 

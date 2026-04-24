@@ -5,8 +5,22 @@ init_z: 2.0
 init_yaw: 0.0
 simulation_rate: 1000
 odom_rate: 400
+use_bodyrate_cmd: true
+hover_percentage: 0.68
+bodyrate_kOm:
+  x: 0.10
+  y: 0.10
+  z: 0.05
+bodyrate_kI:
+  x: 0.03
+  y: 0.03
+  z: 0.01
+bodyrate_i_limit:
+  x: 0.08
+  y: 0.08
+  z: 0.03
 g: 9.81
-mass: 0.98
+mass: 1.735
 Ixx: 2.64e-3
 Iyy: 2.64e-3
 Izz: 4.96e-3

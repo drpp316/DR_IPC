@@ -8,8 +8,16 @@
 extern ACADOvariables acadoVariables;
 extern ACADOworkspace acadoWorkspace;
 
-static constexpr int kCostStateSize = ACADO_NY - ACADO_NU;
+// Running-state reference and terminal-state reference both track only the
+// physical state vector. After removing the SFC slack from the system model,
+// the state-reference dimension should follow ACADO_NYN directly instead of
+// inferring it as (NY - NU).
+static constexpr int kCostStateSize = ACADO_NYN;
 static constexpr int kWeightSize = ACADO_NY * ACADO_N;
+static constexpr int kSoftConstraintResidualSize =
+    ACADO_NY - kCostStateSize - ACADO_NU;
+static_assert(kSoftConstraintResidualSize >= 0,
+              "ACADO_NY must be at least state cost size plus control size.");
 
 // enum MpcErrors{
 //     MPC_OK = 0,
@@ -21,6 +29,8 @@ static constexpr int kWeightSize = ACADO_NY * ACADO_N;
 class MpcWrapper
 {
 private:
+    real_t soft_constraint_weight_{1.0};
+
     Eigen::Map<Eigen::Matrix<real_t, ACADO_NX, 1, Eigen::ColMajor>>
         acado_current_states_{acadoVariables.x0};
 
@@ -47,6 +57,9 @@ private:
         acado_lower_bounds_{acadoVariables.lbValues};
     Eigen::Map<Eigen::Matrix<real_t, ACADO_NU, ACADO_N, Eigen::ColMajor>>
         acado_upper_bounds_{acadoVariables.ubValues};
+
+    Eigen::Matrix<real_t, ACADO_NX, ACADO_N + 1> last_predicted_states_solution_;
+    Eigen::Matrix<real_t, ACADO_NU, ACADO_N> last_controls_solution_;
     // Eigen::Map<Eigen::Matrix<real_t, ACADO_NU, ACADO_N, Eigen::ColMajor>>
     //     acado_lower_affine_bounds_{acadoVariables.lbAValues};
     // Eigen::Map<Eigen::Matrix<real_t, ACADO_NU, ACADO_N, Eigen::ColMajor>>
@@ -55,6 +68,8 @@ private:
 
 public:
     MpcWrapper();
+
+    void setSoftConstraintWeight(real_t weight);
 
     void initMpc(
         const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NX, 1>> &current_states,
@@ -79,6 +94,7 @@ public:
     //     const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NU, 1>>& lower_affine_bounds,
     //     const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NU, 1>>& upper_affine_bounds);
     bool solveMpc(const Eigen::Ref<const Eigen::Matrix<real_t, ACADO_NX, 1>>& current_states);
+    void getMpcStates(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NX, ACADO_N + 1>> states);
     void getMpcControls(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, ACADO_N>> controls);
     void getMpcControl(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, 1>> control, int index);
     void getMpcBound(Eigen::Ref<Eigen::Matrix<real_t, ACADO_NU, 1>> lower_bound,

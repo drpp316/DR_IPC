@@ -17,8 +17,8 @@ class Nodelet : public nodelet::Nodelet{
   quadrotor_msgs::SO3Command so3cmd_;
 
   bool position_cmd_received_flag_ = false;
-  Eigen::Vector3d des_pos_;
-  double des_yaw_;
+  Eigen::Vector3d des_pos_ = Eigen::Vector3d::Zero();  // Initialize to avoid garbage values
+  double des_yaw_ = 0.0;  // Initialize to avoid garbage values
 
   void timer_callback(const ros::TimerEvent& event) {
     if (position_cmd_received_flag_) {

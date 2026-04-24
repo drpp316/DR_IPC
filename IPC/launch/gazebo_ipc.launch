@@ -28,6 +28,17 @@
     </node>
     
     <node name="ipc2" pkg="rviz" type="rviz" args="-d $(find ipc2)/config/env_real.rviz"/>
+    <node name="uav_path_visualization"
+          pkg="ipc2"
+          type="odom_path_pub.py"
+          output="screen">
+        <param name="odom_topic" value="/Odometry"/>
+        <param name="path_topic" value="/odom_visualization/uav_path"/>
+        <param name="frame_id" value="world"/>
+        <param name="max_points" value="3000"/>
+        <param name="min_dist" value="0.02"/>
+        <param name="publish_rate" value="20.0"/>
+    </node>
     <node if="$(arg start_rqt_plot)"
           name="ipc2_rqt_plot"
           pkg="rqt_plot"

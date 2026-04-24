@@ -59,7 +59,6 @@ public:
         nh.param("/ipc2_node/thrust_limit", thrust_limit_, 0.5);
         nh.param("/ipc2_node/hover_esti", hover_esti_flag_, true);
         nh.param("/ipc2_node/hover_perc", hover_perc_, 0.23);
-        nh.param("/ipc2_node/uav_mass", uav_mass_, 1.5);
         if (!nh.getParam("/ipc2_node/dob/eso_bandwidth", eso_bandwidth_)) {
             nh.param("/ipc2_node/eso_bandwidth", eso_bandwidth_, 1.2); // backward-compatible
         }
@@ -77,7 +76,7 @@ public:
         nh.param("/ipc2_node/dob/use_kf_attitude_for_nmpc", use_kf_attitude_for_nmpc_, false);
         nh.param("/ipc2_node/dob/require_mavros_state_for_dob", require_mavros_state_for_dob_, true);
         nh.param("/ipc2_node/yaw_ctrl_flag", yaw_ctrl_flag_, false);
-        nh.param("/ipc2_node/yaw_gain", yaw_gain_, 0.1);
+        nh.param("/ipc2_node/use_pos_cmd", use_pos_cmd_, true);
         double yaw_rate_limit_default = 0.5;
         nh.param("/ipc2_node/mpc/wz_max", yaw_rate_limit_default, yaw_rate_limit_default);
         nh.param("/ipc2_node/yaw_rate_limit", yaw_rate_limit_, yaw_rate_limit_default);
@@ -104,6 +103,7 @@ public:
         }
         nh.param("/ipc2_node/mpc/sfc_apply_steps", sfc_apply_steps_, 8);
         nh.param("/ipc2_node/mpc/log_sfc_constraints", log_sfc_constraints_, false);
+        nh.param("/ipc2_node/mpc/debug_disable_sfc", debug_disable_sfc_, false);
         if (pred_vis_steps_ < 1) pred_vis_steps_ = 1;
         if (sfc_apply_steps_ < 0) sfc_apply_steps_ = 0;
 
@@ -114,12 +114,10 @@ public:
         odom_a_.setZero();
         imu_a_.setZero();
         odom_q_.setIdentity();
-        u_q_.setIdentity();
+        thrust_ = hover_perc_;
         if (simu_flag_) {
-            thrust_ = 0.7;
             mode_ = Command;
         } else {
-            thrust_ = hover_perc_;
             mode_ = Manual;
         }
         ROS_INFO("[IPC2] simu_flag=%d perfect_simu=%d init_mode=%d goal_init=[%.2f %.2f %.2f]",
@@ -411,35 +409,6 @@ private:
         }
     }
     
-    void ComputeThrust(Eigen::Vector3d acc) {
-        const Eigen::Vector3d zB = odom_q_ * Eigen::Vector3d::UnitZ();
-        double des_acc_norm = acc.dot(zB);
-        thrust_ = des_acc_norm / thr2acc_;
-    }
-    void ConvertCommand(Eigen::Vector3d acc, Eigen::Vector3d jerk) {
-        Eigen::Vector3d xB, yB, zB, xC;
-        if (yaw_ctrl_flag_) {
-            double yaw_error = yaw_r_ - yaw_;
-            if (yaw_error >  M_PI) yaw_error -= M_PI * 2;
-            if (yaw_error < -M_PI) yaw_error += M_PI * 2;
-            yaw_dot_r_ = yaw_error * yaw_gain_;
-        } else {
-            yaw_dot_r_ = (0 - yaw_) * yaw_gain_;
-        }
-        xC << std::cos(yaw_), std::sin(yaw_), 0;
-
-        zB = acc.normalized();
-        yB = (zB.cross(xC)).normalized();
-        xB = yB.cross(zB);
-        Eigen::Matrix3d R;
-        R << xB, yB, zB;
-        u_q_ = R;
-
-        Eigen::Vector3d hw = (jerk - (zB.dot(jerk) * zB)) / acc.norm();
-        rate_.x() = -hw.dot(yB);
-        rate_.y() = hw.dot(xB);
-        rate_.z() = yaw_dot_r_ * zB.dot(Eigen::Vector3d(0, 0, 1));
-    }
     bool estimateThrustModel(const Eigen::Vector3d &est_a)
     {
         if (hover_esti_flag_ == false) {
@@ -529,6 +498,9 @@ private:
 
     void PathReplan(bool extend);
     void GeneratePolyOnPath();
+    double ControlMass() const {
+        return mpc_ ? std::max(0.1, mpc_->GetModelMass()) : 1.0;
+    }
     void GenerateAPolytope(Eigen::Vector3d p1, Eigen::Vector3d p2, Eigen::Matrix<double, Eigen::Dynamic, 4>& planes, uint8_t index);
     void Clear_SfC(int begin_step = 0);
     void Update_SfC(int sfc_steps, int& goal_in_sfc);
@@ -554,6 +526,7 @@ private:
     UAVMode_e mode_;
 
     bool simu_flag_, perfect_simu_flag_, pc_ctrl_flag_, hover_esti_flag_, yaw_ctrl_flag_;
+    bool use_pos_cmd_{true};
     bool has_map_flag_{false}, has_odom_flag_{false}, replan_flag_{false}, new_goal_flag_{false};
     bool vehicle_armed_{false};
     bool vehicle_offboard_{false};
@@ -566,6 +539,7 @@ private:
     int pred_vis_steps_{8};
     int sfc_apply_steps_{8};
     bool log_sfc_constraints_{false};
+    bool debug_disable_sfc_{false};
     int mpc_ctrl_index_;
     std::vector<Eigen::Vector3d> remain_nodes_;
 
@@ -580,11 +554,9 @@ private:
 
     Eigen::Vector3d goal_p_, map_upp_;
     Eigen::Vector3d odom_p_, odom_v_, odom_a_, imu_a_;
-    Eigen::Quaterniond odom_q_, u_q_;
-    Eigen::Vector3d rate_;
-    double yaw_{0}, yaw_r_{0}, yaw_dot_r_{0}, yaw_gain_, yaw_rate_limit_{0.5};
+    Eigen::Quaterniond odom_q_;
+    double yaw_{0}, yaw_r_{0}, yaw_rate_limit_{0.5};
     double yaw_freeze_goal_dist_{0.4};
-
     int astar_index_{0};
     std::vector<Eigen::Vector3d> astar_path_;
     std::vector<Eigen::Vector3d> waypoints_;
@@ -595,7 +567,6 @@ private:
     std::vector<Eigen::Vector3d> mpc_goals_;
 
     double thr2acc_;
-    double uav_mass_;
     double min_goal_z_{0.5};
     double eso_bandwidth_;
     double thrust_;

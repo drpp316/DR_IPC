@@ -150,11 +150,13 @@ void PlannerClass::RunMainLoop(int sfc_steps,
             new_goal_flag_ = false;
             replan_flag_ = false;
             PathReplan(true);
+            mpc_->ResetWarmStart();
         }
         // One-shot replan: replan once when flagged, no periodic retry timer.
         if (!new_goal_flag_ && replan_flag_) {
             replan_flag_ = false;
             PathReplan(false);
+            mpc_->ResetWarmStart();
         }
         log_times_[1] = (ros::WallTime::now() - wall_start).toSec() * 1000.0;
 
@@ -235,8 +237,11 @@ void PlannerClass::RunMainLoop(int sfc_steps,
     /*-----------mars——uav——sim支持-------------*/
     // MARS/so3_controller 链路需要 PositionCommand(p/v/a/jerk)。
     // 这里不要把 NMPC 的 bodyrate 控制量当成 jerk 去积分（会导致 a/jerk 物理含义错误）。
-    // 我们改为：从 NMPC 预测状态读取 (p,v,q)，再用 (q,T,m) 计算世界系期望加速度：
-    //   a_des = R(q) * [0,0,T/m] - g
+    // MARS 的 so3_controller 会自己做:
+    //   kx*(p_des-p) + kv*(v_des-v) + m*des_acc + m*g
+    // 官方 test_interface 发送给 /planning/pos_cmd 的 acceleration 本来就是 0。
+    // 因此这里不要把 NMPC 的推力/姿态再反算成 des_acc 塞进去，
+    // 否则会和 so3_controller 自己的 PD + gravity 链路叠加，容易出现异常俯冲/下坠。
     Eigen::Vector3d p_cmd = odom_p_;
     Eigen::Vector3d v_cmd = Eigen::Vector3d::Zero();
     Eigen::Vector3d a_cmd = Eigen::Vector3d::Zero();
@@ -244,26 +249,58 @@ void PlannerClass::RunMainLoop(int sfc_steps,
 
     if (last_nmpc_success_) {
         Eigen::Vector3d p1, v1;
-        // Fall back to current attitude if predicted buffer isn't available.
         Eigen::Quaterniond q0 = odom_q_;
-        // Use stage-1 predicted p/v for smoother tracking.
         if (mpc_->GetPredictedPVQ(1, p1, v1, q0)) {
-            // For simulators (MARS/Gazebo), publish the desired position directly so the
-            // SO3 position loop can remove steady-state offset. In real/bridge mode,
-            // you may want to anchor p_cmd to measurement to avoid setpoint jumps.
-            p_cmd = (simu_flag_ || perfect_simu_flag_) ? p1 : odom_p_;
+            // For MARS, avoid feeding the SO3 outer loop with the raw absolute predicted state.
+            // Once model mismatch appears, p1 can drift away from the measured vehicle state and
+            // the outer loop will keep chasing that drifting point instead of correcting the error.
+            // We therefore keep NMPC's one-step motion intent, but anchor it on the latest
+            // measured position so the closed loop can still pull the vehicle back.
+            Eigen::Vector3d dp_pred = p1 - nmpc_p;
+            if (simu_flag_ || perfect_simu_flag_) {
+                // 对每拍位置增量做限幅，避免 perfect-tracker 链路下出现“秒到终点”。
+                // 限幅尺度与参考速度上限保持一致：max_step ~= v_ref_max * MPC_STEP。
+                // 对 perfect_simu 再加一层速度封顶，避免出现 5m/s 级别“瞬移感”。
+                const double speed_cap = perfect_simu_flag_
+                                             ? std::min(ref_v_max_, 0.6)
+                                             : ref_v_max_;
+                const double max_step = std::max(1e-3, speed_cap * mpc_->MPC_STEP);
+                const double dp_norm = dp_pred.norm();
+                if (dp_norm > max_step && dp_norm > 1e-9) {
+                    dp_pred = dp_pred * (max_step / dp_norm);
+                }
+                p_cmd = odom_p_ + dp_pred;
+            } else {
+                p_cmd = odom_p_;
+            }
             v_cmd = v1;
-        }
 
-        Eigen::Vector3d w_cmd_unused;
-        double T_cmd = 0.0;
-        mpc_->GetBodyrateCmd(w_cmd_unused, T_cmd);
-        const double m = std::max(0.1, mpc_->GetModelMass());
-        const Eigen::Vector3d zb_world = q0 * Eigen::Vector3d::UnitZ(); // body z in world
-        a_cmd = zb_world * (T_cmd / m) - Gravity_;
+            // Feed forward world-frame acceleration from NMPC optimized states.
+            // NMPC state does not explicitly store acceleration, so we approximate it
+            // from predicted velocity differences instead of reusing thrust/attitude.
+            Eigen::Vector3d a_ff = (v1 - nmpc_v) / std::max(1e-3, mpc_->MPC_STEP);
+            Eigen::Vector3d p2, v2;
+            Eigen::Quaterniond q2 = q0;
+            if (mpc_->GetPredictedPVQ(2, p2, v2, q2)) {
+                a_ff = (v2 - v1) / std::max(1e-3, mpc_->MPC_STEP);
+            }
+            a_cmd = a_ff;
+
+            // MARS 避障链路（/planning/pos_cmd）下，先把高度通道做成稳态优先：
+            // 1) 高度位置直接锚定到目标高度（并保证不低于 min_goal_z_）
+            // 2) 去掉 z 方向速度/加速度前馈，避免模型失配导致持续下坠
+            if (simu_flag_ || perfect_simu_flag_) {
+                const double z_cmd = std::max(min_goal_z_, goal_p_.z());
+                p_cmd.z() = z_cmd;
+                v_cmd.z() = 0.0;
+                a_cmd.z() = 0.0;
+            }
+        }
     }
 
-    CmdPublish(p_cmd, v_cmd, a_cmd, j_cmd); //发布给 MARS——uav——sim 的 so3
+    if (use_pos_cmd_) {
+        CmdPublish(p_cmd, v_cmd, a_cmd, j_cmd); // 发布给 /planning/pos_cmd 链路
+    }
 }
 
 Eigen::Vector3d PlannerClass::UpdateDisturbanceEstimate(const Eigen::Vector3d& cmd_rate,
@@ -297,7 +334,7 @@ Eigen::Vector3d PlannerClass::UpdateDisturbanceEstimate(const Eigen::Vector3d& c
         disturbance_observer_.setFirstZ(y);
         disturbance_inited_ = true;
     }
-    disturbance_observer_.kalman_geso_update(y, u, uav_mass_, 9.8066); // DOB计算
+    disturbance_observer_.kalman_geso_update(y, u, ControlMass(), 9.8066); // DOB计算
 
     kf_state_latest_ = disturbance_observer_.getKfState();
     has_kf_state_ = (kf_state_latest_.size() >= 10);
@@ -325,7 +362,8 @@ void PlannerClass::PublishCompensatedControl(const Eigen::Vector3d& d_hat_live,
     disturbance_hat_pub_.publish(d_hat_msg);
 
     // 计算油门归一化值，供飞控使用
-    double thrust_norm = T_cmd / (uav_mass_ * thr2acc_);
+    const double control_mass = ControlMass();
+    double thrust_norm = T_cmd / (control_mass * thr2acc_);
     thrust_norm = std::max(0.1, std::min(0.9, thrust_norm));
 
     ROS_INFO_THROTTLE(0.3,
@@ -503,6 +541,20 @@ void PlannerClass::UpdateCommandModeGoalsAndSfc(int sfc_steps)
                     v_r = v_r / v_norm * ref_v_max_;
                 }
             }
+            // 抑制“后退犹豫”：去掉朝目标反方向的速度分量（仅xy平面）。
+            {
+                const Eigen::Vector2d goal_dir_xy = goal_p_.head<2>() - odom_p_.head<2>();
+                if (goal_dir_xy.squaredNorm() > 1e-8) {
+                    const Eigen::Vector2d g = goal_dir_xy.normalized();
+                    Eigen::Vector2d v_xy(v_r.x(), v_r.y());
+                    const double v_forward = v_xy.dot(g);
+                    if (v_forward < 0.0) {
+                        v_xy = v_xy - v_forward * g;  // 去掉反向分量，保留侧向绕障分量
+                        v_r.x() = v_xy.x();
+                        v_r.y() = v_xy.y();
+                    }
+                }
+            }
             last_p_ref = p_ref;
 
             //yaw参考
@@ -550,6 +602,20 @@ void PlannerClass::UpdateCommandModeGoalsAndSfc(int sfc_steps)
                 v_terminal = v_terminal / v_norm * ref_v_max_;
             }
         }
+        // 终端点同样抑制反向速度，减少终点前后抽动。
+        {
+            const Eigen::Vector2d goal_dir_xy = goal_p_.head<2>() - odom_p_.head<2>();
+            if (goal_dir_xy.squaredNorm() > 1e-8) {
+                const Eigen::Vector2d g = goal_dir_xy.normalized();
+                Eigen::Vector2d v_xy(v_terminal.x(), v_terminal.y());
+                const double v_forward = v_xy.dot(g);
+                if (v_forward < 0.0) {
+                    v_xy = v_xy - v_forward * g;
+                    v_terminal.x() = v_xy.x();
+                    v_terminal.y() = v_xy.y();
+                }
+            }
+        }
         mpc_->SetGoal(p_terminal, v_terminal, Eigen::Vector3d::Zero(),
                       mpc_->MPC_HORIZON, last_yaw_ref);
 
@@ -585,10 +651,7 @@ void PlannerClass::Clear_SfC(int begin_step)
     if (begin_step >= mpc_->MPC_HORIZON) {
         return;
     }
-    Eigen::Matrix<double, Eigen::Dynamic, 4> empty_planes;
-    for (int i = begin_step; i < mpc_->MPC_HORIZON; ++i) {
-        mpc_->SetFSC(empty_planes, i);
-    }
+    mpc_->ClearFSCSharedRange(begin_step, mpc_->MPC_HORIZON - 1);
 }
 
 /*
@@ -601,6 +664,11 @@ void PlannerClass::Clear_SfC(int begin_step)
 void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
 {
     Clear_SfC(0);//sfc清空
+    if (debug_disable_sfc_) {
+        goal_in_sfc = static_cast<int>(follow_path_.size());
+        ROS_WARN_THROTTLE(1.0, "[SFC] debug_disable_sfc=true, skip writing NMPC SFC constraints.");
+        return;
+    }
     /*if (sfc_steps <= 0) {
         return;
     }*/
@@ -627,9 +695,7 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
             ROS_WARN_THROTTLE(0.5, "[SFC] near-end planes all violated, skip constraints this cycle.");
             return;
         }
-        for (int i = 0; i < sfc_steps; i++) {
-            mpc_->SetFSC(planes_used, i);
-        }
+        mpc_->SetFSCSharedRange(planes_used, 0, sfc_steps - 1);
         return;
     }
 
@@ -668,8 +734,8 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
     }
     mpc_goal_index = (first_id - astar_index_) / ref_dis_ + init_num + 1;
     assert(first_id >= astar_index_);
-    for (int i = init_num; i <= mpc_goal_index && i < sfc_steps; i++) {
-        mpc_->SetFSC(planes_used, i);
+    if (init_num < sfc_steps) {
+        mpc_->SetFSCSharedRange(planes_used, init_num, std::min(mpc_goal_index, sfc_steps - 1));
     }
 
     int end_index = first_id + (mpc_->MPC_HORIZON - mpc_goal_index) * ref_dis_;
@@ -691,9 +757,7 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
             FilterAndSortPlanes(long_oriented, odom_p_);
         WriteSfcPlaneCount("long", long_used, sfc_steps, path_size, &ref_eval);
         if (long_used.rows() > 0) {
-            for (int j = mpc_goal_index + 1; j < sfc_steps; j++) {
-                mpc_->SetFSC(long_used, j);
-            }
+            mpc_->SetFSCSharedRange(long_used, mpc_goal_index + 1, sfc_steps - 1);
             mpc_goal_index = mpc_->MPC_HORIZON;
             for (int k = first_id; k < path_size; k++) {
                 if (mpc_->IsInFSC(follow_path_[k], long_used)) goal_in_sfc = k;
@@ -703,10 +767,8 @@ void PlannerClass::Update_SfC(int sfc_steps, int& goal_in_sfc)
             break;
         }
     }
-    for (int i = mpc_goal_index + 1; i < sfc_steps; i++) {
-        if (last_planes.rows() > 0) {
-            mpc_->SetFSC(last_planes, i);
-        }
+    if (last_planes.rows() > 0) {
+        mpc_->SetFSCSharedRange(last_planes, mpc_goal_index + 1, sfc_steps - 1);
     }
     if (last_planes.rows() > 0) {
         WriteSfcPlaneCount("last", last_planes, sfc_steps, path_size, &ref_eval);
@@ -881,15 +943,19 @@ void PlannerClass::GoalCallback(const geometry_msgs::PoseStampedConstPtr& msg)
 {
     goal_mutex_.lock();
 
-    static Eigen::Vector3d last_goal;
+    static bool has_last_goal = false;
+    static Eigen::Vector3d last_goal = Eigen::Vector3d::Zero();
     Eigen::Vector3d new_goal(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
 
-    if (last_goal != new_goal && mode_ == Command) {
+    if ((!has_last_goal || !last_goal.isApprox(new_goal, 1e-6)) && mode_ == Command) {
          goal_p_ << msg->pose.position.x, msg->pose.position.y, goal_p_.z(); // 2d path searching
         //goal_p_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
         if (goal_p_.z() > map_upp_.z() - 0.5) goal_p_.z() = map_upp_.z() - 0.5;
         if (goal_p_.z() < 0.5) goal_p_.z() = 0.5;
         new_goal_flag_ = true;
+        has_last_goal = true;
+        ROS_INFO("[IPC2] goal accepted in Command mode: [%.2f %.2f %.2f]",
+                 goal_p_.x(), goal_p_.y(), goal_p_.z());
     }
     last_goal = new_goal;
 
@@ -985,8 +1051,14 @@ void PlannerClass::LocalPcCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
         obs_count = 0;
     }
     if (obs_count >= 2) {
-        obs_count = 0;
-        replan_flag_ = true;
+        // 重规划冷却：避免动态障碍附近高频重规划导致参考来回翻转。
+        static ros::Time last_replan_trig = ros::Time(0);
+        const ros::Time now_replan = ros::Time::now();
+        if ((now_replan - last_replan_trig).toSec() > 0.6) {
+            obs_count = 0;
+            replan_flag_ = true;
+            last_replan_trig = now_replan;
+        }
     }
     
     // local_astar_->GetOccupyPcl(cloud);

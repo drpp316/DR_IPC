@@ -48,6 +48,7 @@ public:
         nh.param("/ipc2_node/mpc/R_w", r_w, r_w);
         nh.param("/ipc2_node/mpc/R_T", r_t, r_t);
         nh.param("/ipc2_node/mpc/R_sfc_eps", r_sfc_eps, r_sfc_eps);
+        sfc_soft_weight_ = std::max(0.0, r_sfc_eps);
 
         q_.setZero();
         q_(0, 0) = r_p;
@@ -87,13 +88,11 @@ public:
         double wz_lim = 2.0;
         double t_min = 0.0;
         double t_max = 2.0 * kGravity * model_mass_;
-        double sfc_eps_max = 2.0;
         nh.param("/ipc2_node/mpc/wx_max", wx_lim, wx_lim);
         nh.param("/ipc2_node/mpc/wy_max", wy_lim, wy_lim);
         nh.param("/ipc2_node/mpc/wz_max", wz_lim, wz_lim);
         nh.param("/ipc2_node/mpc/T_min", t_min, t_min);
         nh.param("/ipc2_node/mpc/T_max", t_max, t_max);
-        nh.param("/ipc2_node/mpc/sfc_eps_max", sfc_eps_max, sfc_eps_max);
 
         control_lower_bound_.setZero();
         control_upper_bound_.setZero();
@@ -113,15 +112,11 @@ public:
             control_lower_bound_(3) = t_min;
             control_upper_bound_(3) = t_max;
         }
-        if (ACADO_NU > 4) {
-            control_lower_bound_(4) = 0.0;
-            control_upper_bound_(4) = std::max(0.0, sfc_eps_max);
-        }
-
         nh.param("/ipc2_node/mpc/sfc_active_planes", sfc_active_planes_, kSfcMaxPlanes);
         sfc_active_planes_ = std::max(1, std::min(kSfcMaxPlanes, sfc_active_planes_));
 
         resetBuffers();
+        mpc_wrapper_.setSoftConstraintWeight(static_cast<real_t>(sfc_soft_weight_));
         mpc_wrapper_.initMpc(current_states_, predicted_states_, reference_states_,
                              reference_controls_, q_, r_);
         mpc_wrapper_.setMpcWeight(ACADO_N, qn_, r_);
@@ -219,11 +214,16 @@ public:
         }
 
         if (ok) {
+            mpc_wrapper_.getMpcStates(predicted_states_);
             last_control_ = current_control_;
         } else {
             current_control_ = BuildSafeHoverControl();
         }
         return ok;
+    }
+
+    void ResetWarmStart() {
+        ResetSolver();
     }
 
     void GetBodyrateCmd(Eigen::Vector3d& w_cmd, double& T_cmd) const {
@@ -244,24 +244,24 @@ public:
             return false;
         }
 
-        p << acadoVariables.x[base + 0],
-             acadoVariables.x[base + 1],
-             acadoVariables.x[base + 2];
+        p << predicted_states_(0, k),
+             predicted_states_(1, k),
+             predicted_states_(2, k);
 
         // Quaternion stored as w,x,y,z
-        q = Eigen::Quaterniond(acadoVariables.x[base + 3],
-                               acadoVariables.x[base + 4],
-                               acadoVariables.x[base + 5],
-                               acadoVariables.x[base + 6]);
+        q = Eigen::Quaterniond(predicted_states_(3, k),
+                               predicted_states_(4, k),
+                               predicted_states_(5, k),
+                               predicted_states_(6, k));
         if (q.coeffs().allFinite() && q.norm() > 1e-6) {
             q.normalize();
         } else {
             q.setIdentity();
         }
 
-        v << acadoVariables.x[base + 7],
-             acadoVariables.x[base + 8],
-             acadoVariables.x[base + 9];
+        v << predicted_states_(7, k),
+             predicted_states_(8, k),
+             predicted_states_(9, k);
 
         return p.allFinite() && v.allFinite();
     }
@@ -280,13 +280,10 @@ public:
         path.reserve(MPC_HORIZON + 1);
 
         // Read ACADO state buffer with explicit stage-major indexing:
-        // x[k * ACADO_NX + j], k in [0, N], j in [0, NX-1].
-        // This avoids any ambiguity from matrix mapping/storage order.
         for (int i = 0; i <= MPC_HORIZON; ++i) {
-            const int base = i * ACADO_NX;
-            path.emplace_back(acadoVariables.x[base + 0],
-                              acadoVariables.x[base + 1],
-                              acadoVariables.x[base + 2]);
+            path.emplace_back(predicted_states_(0, i),
+                              predicted_states_(1, i),
+                              predicted_states_(2, i));
         }
     }
 
@@ -339,6 +336,34 @@ public:
             planes_[step] = planes.topRows(keep);
         }
         RefreshOnlineData();
+    }
+
+    void SetFSCSharedRange(const Eigen::Matrix<double, Eigen::Dynamic, 4>& planes,
+                           int begin_step, int end_step) {
+        if (begin_step < 0) {
+            begin_step = 0;
+        }
+        if (end_step >= ACADO_N) {
+            end_step = ACADO_N - 1;
+        }
+        if (begin_step > end_step || planes_.empty()) {
+            return;
+        }
+
+        const int keep = std::max(0, std::min(static_cast<int>(planes.rows()), sfc_active_planes_));
+        for (int step = begin_step; step <= end_step; ++step) {
+            if (keep == 0) {
+                planes_[step].resize(0, 4);
+            } else {
+                planes_[step] = planes.topRows(keep);
+            }
+        }
+        RefreshOnlineData();
+    }
+
+    void ClearFSCSharedRange(int begin_step, int end_step) {
+        Eigen::Matrix<double, Eigen::Dynamic, 4> empty_planes;
+        SetFSCSharedRange(empty_planes, begin_step, end_step);
     }
 
     bool IsInFSC(Eigen::Vector3d pos, Eigen::Matrix<double, Eigen::Dynamic, 4>& planes) {
@@ -487,6 +512,7 @@ private:
 
     void ResetSolver() {
         predicted_states_ = current_states_.replicate(1, ACADO_N + 1);
+        mpc_wrapper_.setSoftConstraintWeight(static_cast<real_t>(sfc_soft_weight_));
         mpc_wrapper_.initMpc(current_states_, predicted_states_, reference_states_,
                              reference_controls_, q_, r_);
         mpc_wrapper_.setMpcWeight(ACADO_N, qn_, r_);
@@ -509,11 +535,20 @@ private:
     static constexpr double kGravity = 9.8066;
     static constexpr int kDisturbanceDim = 3;
     static constexpr int kSfcCoeffDim = 4;
-    static constexpr int kSfcMaxPlanes = ACADO_NPAC;
+    // ACADO codegen in the current setup correctly exports NOD = 3 + 4*K for
+    // K shared SFC planes, but ACADO_NPAC in the generated header may still be
+    // reported as 0 even when affine constraints are present. Derive the plane
+    // capacity from online-data width instead of ACADO_NPAC to avoid silently
+    // clamping the planner down to a single active plane.
+    static constexpr int kSfcMaxPlanes =
+        (ACADO_NOD > kDisturbanceDim)
+            ? ((ACADO_NOD - kDisturbanceDim) / kSfcCoeffDim)
+            : 0;
 
     MpcWrapper mpc_wrapper_;
     double model_mass_{1.735};
     int sfc_active_planes_{kSfcMaxPlanes};
+    double sfc_soft_weight_{1.0};
     Eigen::Vector3d disturbance_filtered_{Eigen::Vector3d::Zero()};
 
     Eigen::Matrix<real_t, ACADO_NX, 1> current_states_;

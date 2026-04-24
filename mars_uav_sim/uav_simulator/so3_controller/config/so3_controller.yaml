@@ -1,5 +1,5 @@
 g: 9.81
-mass: 0.98
+mass: 1.735
 gains/rot/x  : 1.5
 gains/rot/y  : 1.5
 gains/rot/z  : 1.0
