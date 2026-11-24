@@ -337,7 +337,7 @@ The controller loads `src/DR_IPC/dripc/config/gazebo.yaml` in the workspace.
 The transmitter layout and RC channel mapping used in our experiments are shown below for reference. Both figures are stored in `dripc/scripts/How2Use/real flight/`.
 
 <p align="center">
-  <img src="dripc/scripts/How2Use/real%20flight/遥控器.png" alt="Reference transmitter switch layout" width="48%">
+  <img src="dripc/scripts/How2Use/real%20flight/遥控器.jpg" alt="Reference transmitter switch layout" width="48%">
 </p>
 
 
