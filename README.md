@@ -1,3 +1,5 @@
+# Source code is NOT available now. It will be released after our paper published.
+
 # DR-IPC
 
 **Disturbance-Resilient Integrated Planning and Control for LiDAR-Based Quadrotor Navigation**
@@ -332,7 +334,7 @@ The controller loads `src/DR_IPC/dripc/config/gazebo.yaml` in the workspace.
 
 ### 4. Real-world flight
 
-**Real-flight tutorial video:** Coming soon.
+**Real-flight tutorial video:** - **Bilibili:** [Watch the DR-IPC video](https://www.bilibili.com/video/BV12Ys86bEiZ)
 
 The transmitter layout and RC channel mapping used in our experiments are shown below for reference. Both figures are stored in `dripc/scripts/How2Use/real flight/`.
 
