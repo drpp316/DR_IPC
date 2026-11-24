@@ -1,6 +1,0 @@
-**.DS_Store
-**/build
-**/devel
-**/cmake-build-debug
-**/.idea
-./kite_ws/.catkin_workspace
