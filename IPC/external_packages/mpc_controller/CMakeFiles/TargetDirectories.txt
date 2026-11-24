@@ -1,3 +1,0 @@
-/home/go2/ws_my/src/quadrotor_mpc/mpc_controller/CMakeFiles/quadrotor_acado_export.dir
-/home/go2/ws_my/src/quadrotor_mpc/mpc_controller/CMakeFiles/edit_cache.dir
-/home/go2/ws_my/src/quadrotor_mpc/mpc_controller/CMakeFiles/rebuild_cache.dir
